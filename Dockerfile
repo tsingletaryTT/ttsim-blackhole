@@ -8,12 +8,17 @@
 FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-rc
 
 # Build ttsim's Blackhole simulator library from source, pinned to v1.10.1.
-# NOT the latest tag: v1.10.5 (current HEAD as of this writing) has a
-# reproduced regression on Blackhole -- any ttnn.matmul with an output free
-# dimension of 3072 (e.g. a GPT-2-style MLP up-projection, 768 -> 3072)
-# aborts with `UnsupportedFunctionality: tensix_pacr: Disable_pack_zero_flags`,
-# even though the same op sequence at narrower widths (768) is fine. Re-test
-# against a newer tag before moving this pin.
+# NOT the latest tag: bisected every v1.10.x release through v1.10.6
+# (2026-09-07, latest at the time) -- v1.10.1 and v1.10.2 are clean, v1.10.3
+# onward all have a regression on Blackhole: any ttnn.matmul with an output
+# free dimension of 3072 (e.g. a GPT-2-style MLP up-projection, 768 -> 3072 --
+# exactly what the "Real HF Checkpoint" kernel needs) aborts with
+# `UnsupportedFunctionality: tensix_pacr: Disable_pack_zero_flags`, even
+# though the same op sequence at narrower widths (768) is fine. No measurable
+# perf difference on the ops this Space actually uses (attention, mesh)
+# between v1.10.1 and v1.10.6 either, so there is currently no upgrade
+# benefit that doesn't break the "Real HF Checkpoint" kernel. Re-test before
+# moving this pin.
 RUN git clone --depth=1 --branch v1.10.1 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
     && cd /opt/ttsim-src \
     && ./make.py src/_out/release_bh/libttsim.so \
@@ -25,11 +30,13 @@ RUN git clone --depth=1 --branch v1.10.1 https://github.com/tenstorrent/ttsim.gi
 # exactly `soc_descriptor.yaml`.
 COPY soc_descriptor_bh.yaml /opt/sim/bh/soc_descriptor.yaml
 
-# A second build at HEAD (the same regressed version described above),
-# used ONLY by the "Break the Rules" playground kernel to show a real, still
-# -open Blackhole limitation live -- every other kernel uses the stable
-# v1.10.1 pin above.
-RUN git clone --depth=1 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src-head \
+# A second build at the latest tag (the regression described above, still
+# reproduced as of this version), used ONLY by the "Break the Rules"
+# playground kernel to show a real, still-open Blackhole limitation live --
+# every other kernel uses the stable v1.10.1 pin above. Pinned to an exact
+# tag (not a floating clone of the default branch) so this kernel's behavior
+# doesn't silently change on an unrelated rebuild.
+RUN git clone --depth=1 --branch v1.10.6 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src-head \
     && cd /opt/ttsim-src-head \
     && ./make.py src/_out/release_bh/libttsim.so \
     && mkdir -p /opt/sim/bh_head \

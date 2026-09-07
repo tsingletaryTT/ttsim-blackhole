@@ -230,14 +230,20 @@
             tag: 'expected to fail',
             backend: 'ttsim-bh-head',
             code: _dedent(`
-                # This runs against ttsim's latest (HEAD) build, not the stable v1.10.1
-                # pin every other kernel on this page uses. HEAD has a real, reproduced
-                # regression on Blackhole: any ttnn.matmul with an output width of 3072
-                # (exactly the width of a GPT-2-style MLP up-projection) aborts with a
-                # named, categorized error -- even though the identical op at a narrower
-                # width (768) is fine. We found this by accident while building the
-                # "Real HF Checkpoint" kernel on the left, then bisected it down to
-                # this one line.
+                # This runs against ttsim v1.10.6 (the latest release as of this
+                # writing), not the stable v1.10.1 pin every other kernel on this
+                # page uses. v1.10.6 has a real, reproduced regression on
+                # Blackhole: any ttnn.matmul with an output width of 3072 (exactly
+                # the width of a GPT-2-style MLP up-projection) aborts with a
+                # named, categorized error -- even though the identical op at a
+                # narrower width (768) is fine. We found this by accident while
+                # building the "Real HF Checkpoint" kernel on the left (which
+                # needs exactly this shape), then bisected it down to this one
+                # line. Bisected across every v1.10.x release through v1.10.6:
+                # v1.10.1 and v1.10.2 are clean, v1.10.3 onward (through the
+                # latest, v1.10.6) all have it -- v1.10.2 is the newest version
+                # that doesn't, but v1.10.1 is the pin every other kernel here
+                # uses since there was no reason found yet to move it.
                 #
                 # ttsim's own docs explain why this is a *feature*, not a bug in the
                 # simulator itself: it is stricter than silicon on purpose, so it
@@ -252,7 +258,7 @@
                 xt = ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=device)
                 wt = ttnn.from_torch(w, layout=ttnn.TILE_LAYOUT, device=device)
 
-                print("Dispatching a 768x3072 matmul on ttsim HEAD...")
+                print("Dispatching a 768x3072 matmul on ttsim v1.10.6...")
                 out = ttnn.matmul(xt, wt)  # <-- this is where it aborts
                 print("Somehow passed:", ttnn.to_torch(ttnn.from_device(out)).shape)
             `),
