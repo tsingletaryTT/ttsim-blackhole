@@ -25,6 +25,26 @@ RUN git clone --depth=1 --branch v1.10.1 https://github.com/tenstorrent/ttsim.gi
 # exactly `soc_descriptor.yaml`.
 COPY soc_descriptor_bh.yaml /opt/sim/bh/soc_descriptor.yaml
 
+# A second build at HEAD (the same regressed version described above),
+# used ONLY by the "Break the Rules" playground kernel to show a real, still
+# -open Blackhole limitation live -- every other kernel uses the stable
+# v1.10.1 pin above.
+RUN git clone --depth=1 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src-head \
+    && cd /opt/ttsim-src-head \
+    && ./make.py src/_out/release_bh/libttsim.so \
+    && mkdir -p /opt/sim/bh_head \
+    && cp src/_out/release_bh/libttsim.so /opt/sim/bh_head/libttsim_bh.so \
+    && rm -rf /opt/ttsim-src-head
+COPY soc_descriptor_bh.yaml /opt/sim/bh_head/soc_descriptor.yaml
+
+# The 2-chip Blackhole (P300) simulator, for the mesh kernel -- prebuilt
+# release binary (no source build needed for this one).
+RUN mkdir -p /opt/sim/bh_x2 \
+    && curl -sL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
+        https://github.com/tenstorrent/ttsim/releases/download/v1.10.1/libttsim_bh_x2.so
+COPY soc_descriptor_bh.yaml /opt/sim/bh_x2/soc_descriptor.yaml
+COPY blackhole_P300_both_mmio.yaml /opt/sim/bh_x2/cluster_descriptor.yaml
+
 # CPU-only torch + transformers (for real HF-checkpoint demos) and the API
 # server's own deps, all into the same venv that already has ttnn -- one
 # process, one interpreter, no dev-checkout PYTHONPATH tricks needed.

@@ -5,9 +5,11 @@ POST /execute  — synchronous, returns full stdout/stderr as JSON
 WS   /execute  — streams stdout/stderr chunks as JSON messages
 
 Backends:
-  ttlang-sim   — pure Python, runs via `ttlang-sim <file>`
-  ttsim-wh     — Wormhole hardware-emulation binary (TT_METAL_SIMULATOR env)
-  ttsim-bh     — Blackhole hardware-emulation binary
+  ttlang-sim    — pure Python, runs via `ttlang-sim <file>`
+  ttsim-bh      — single Blackhole chip (v1.10.1, the stable pin)
+  ttsim-bh-x2   — two Blackhole chips over simulated Ethernet (P300 mesh)
+  ttsim-bh-head — single Blackhole chip at ttsim HEAD (a known regression,
+                  used only by the "Break the Rules" kernel)
 
 Auth: X-API-Key header checked against comma-separated API_KEYS env var.
 """
@@ -71,8 +73,23 @@ app.add_middleware(
 
 class Backend(str, Enum):
     ttlang_sim = "ttlang-sim"
-    ttsim_wh = "ttsim-wh"
     ttsim_bh = "ttsim-bh"
+    ttsim_bh_x2 = "ttsim-bh-x2"
+    ttsim_bh_head = "ttsim-bh-head"
+
+
+# Per-backend simulator layout: SIM_HOME/<dir>/<so_name>, with
+# SIM_HOME/<dir>/soc_descriptor.yaml as a required sibling (ttsim resolves
+# it relative to the .so path) and, for multi-chip backends,
+# SIM_HOME/<dir>/cluster_descriptor.yaml.
+BACKEND_SIM_CONFIG: dict[Backend, dict] = {
+    Backend.ttsim_bh: {"dir": "bh", "so_name": "libttsim_bh.so", "arch": "blackhole"},
+    Backend.ttsim_bh_x2: {
+        "dir": "bh_x2", "so_name": "libttsim_bh_x2.so", "arch": "blackhole",
+        "cluster_desc": True,
+    },
+    Backend.ttsim_bh_head: {"dir": "bh_head", "so_name": "libttsim_bh.so", "arch": "blackhole"},
+}
 
 
 class ExecuteRequest(BaseModel):
@@ -111,9 +128,9 @@ def _build_cmd(backend: Backend, script_path: str) -> list[str]:
             raise HTTPException(status_code=503, detail="ttlang-sim not found in PATH")
         return [ttlang_sim, script_path]
 
-    if backend in (Backend.ttsim_wh, Backend.ttsim_bh):
-        chip = "wh" if backend == Backend.ttsim_wh else "bh"
-        so_path = SIM_HOME / chip / f"libttsim_{chip}.so"
+    cfg = BACKEND_SIM_CONFIG.get(backend)
+    if cfg is not None:
+        so_path = SIM_HOME / cfg["dir"] / cfg["so_name"]
         if not so_path.exists():
             raise HTTPException(
                 status_code=503,
@@ -131,12 +148,15 @@ def _build_cmd(backend: Backend, script_path: str) -> list[str]:
 def _build_env(backend: Backend) -> dict[str, str]:
     """Return extra environment variables needed by the backend."""
     env = os.environ.copy()
-    if backend in (Backend.ttsim_wh, Backend.ttsim_bh):
-        chip = "wh" if backend == Backend.ttsim_wh else "bh"
-        env["TT_METAL_SIMULATOR"] = str(SIM_HOME / chip / f"libttsim_{chip}.so")
-        env["TT_METAL_ARCH_NAME"] = "wormhole_b0" if chip == "wh" else "blackhole"
+    cfg = BACKEND_SIM_CONFIG.get(backend)
+    if cfg is not None:
+        sim_dir = SIM_HOME / cfg["dir"]
+        env["TT_METAL_SIMULATOR"] = str(sim_dir / cfg["so_name"])
+        env.setdefault("TT_METAL_ARCH_NAME", cfg["arch"])
         env["TT_METAL_SLOW_DISPATCH_MODE"] = "1"
         env["TT_METAL_DISABLE_SFPLOADMACRO"] = "1"
+        if cfg.get("cluster_desc"):
+            env["TT_METAL_MOCK_CLUSTER_DESC_PATH"] = str(sim_dir / "cluster_descriptor.yaml")
         # TT_METAL_HOME/PYTHONPATH only matter for a dev-checkout ttnn; this
         # deployment uses the self-contained pip wheel, so leave PYTHONPATH
         # alone unless a checkout is explicitly configured.
@@ -333,14 +353,23 @@ async def execute_ws(websocket: WebSocket) -> None:
 # Health
 # ---------------------------------------------------------------------------
 
+def _backend_ready(cfg: dict) -> bool:
+    """True only if this backend could actually execute: the .so exists AND
+    (for multi-chip backends) the cluster descriptor exists AND
+    TT_METAL_PYTHON resolves -- the same conditions _build_cmd checks."""
+    sim_dir = SIM_HOME / cfg["dir"]
+    so_ok = (sim_dir / cfg["so_name"]).exists()
+    cluster_ok = (not cfg.get("cluster_desc")) or (sim_dir / "cluster_descriptor.yaml").exists()
+    return bool(so_ok and cluster_ok and shutil.which(TT_METAL_PYTHON))
+
+
 @app.get("/health")
 async def health() -> dict:
     return {
         "status": "ok",
         "backends": {
             "ttlang-sim": bool(shutil.which("ttlang-sim")),
-            "ttsim-wh": (SIM_HOME / "wh" / "libttsim_wh.so").exists(),
-            "ttsim-bh": (SIM_HOME / "bh" / "libttsim_bh.so").exists(),
+            **{b.value: _backend_ready(cfg) for b, cfg in BACKEND_SIM_CONFIG.items()},
         },
     }
 
