@@ -6,10 +6,8 @@ WS   /execute  — streams stdout/stderr chunks as JSON messages
 
 Backends:
   ttlang-sim    — pure Python, runs via `ttlang-sim <file>`
-  ttsim-bh      — single Blackhole chip (v1.10.1, the stable pin)
+  ttsim-bh      — single Blackhole chip
   ttsim-bh-x2   — two Blackhole chips over simulated Ethernet (P300 mesh)
-  ttsim-bh-head — single Blackhole chip at ttsim HEAD (a known regression,
-                  used only by the "Break the Rules" kernel)
 
 Auth: X-API-Key header checked against comma-separated API_KEYS env var.
 """
@@ -75,7 +73,6 @@ class Backend(str, Enum):
     ttlang_sim = "ttlang-sim"
     ttsim_bh = "ttsim-bh"
     ttsim_bh_x2 = "ttsim-bh-x2"
-    ttsim_bh_head = "ttsim-bh-head"
 
 
 # Per-backend simulator layout: SIM_HOME/<dir>/<so_name>, with
@@ -88,7 +85,6 @@ BACKEND_SIM_CONFIG: dict[Backend, dict] = {
         "dir": "bh_x2", "so_name": "libttsim_bh_x2.so", "arch": "blackhole",
         "cluster_desc": True,
     },
-    Backend.ttsim_bh_head: {"dir": "bh_head", "so_name": "libttsim_bh.so", "arch": "blackhole"},
 }
 
 
