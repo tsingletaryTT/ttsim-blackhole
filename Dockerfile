@@ -7,8 +7,8 @@
 # (libmpi, libhwloc, libnuma, libevent-core/pthreads) are already present.
 FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-rc
 
-# Build ttsim's Blackhole simulator library from source, pinned to v1.10.6
-# (the latest tag as of 2026-09-09).
+# Build ttsim's Blackhole simulator library from source, pinned to v1.10.8
+# (the latest tag as of 2026-09-15).
 #
 # History: v1.10.1 was pinned instead of latest for a while, because v1.10.3
 # through v1.10.6 had a reproduced regression on Blackhole -- any
@@ -24,7 +24,15 @@ FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-
 # pin. This is exactly the kind of thing that can un-fix itself on a future
 # rebuild of either project -- if the wide-matmul case ever breaks again,
 # that's why, and v1.10.1/v1.10.2 are the known-good fallback.
-RUN git clone --depth=1 --branch v1.10.6 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
+#
+# 2026-09-15: bumped to v1.10.8 (v1.10.7 and v1.10.8 both released since the
+# v1.10.6 pin). Neither release touches the wide-matmul regression above;
+# both carry Blackhole-relevant unpacker/ADC addressing fixes (v1.10.7:
+# MOVA2D/Fp32 fix, MVMUL/UNPACR perf; v1.10.8: UNPACR ADC masking fix, wider
+# ADC counter) that don't apply to anything this Space currently exercises.
+# Bumping anyway to track upstream and pick up the fixes for free. Re-ran all
+# 7 kernels end-to-end against the rebuilt image before pushing.
+RUN git clone --depth=1 --branch v1.10.8 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
     && cd /opt/ttsim-src \
     && ./make.py src/_out/release_bh/libttsim.so \
     && mkdir -p /opt/sim/bh \
@@ -36,10 +44,10 @@ RUN git clone --depth=1 --branch v1.10.6 https://github.com/tenstorrent/ttsim.gi
 COPY soc_descriptor_bh.yaml /opt/sim/bh/soc_descriptor.yaml
 
 # The 2-chip Blackhole (P300) simulator, for the mesh kernel -- prebuilt
-# release binary (no source build needed for this one), same v1.10.6 pin.
+# release binary (no source build needed for this one), same v1.10.8 pin.
 RUN mkdir -p /opt/sim/bh_x2 \
     && curl -sL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
-        https://github.com/tenstorrent/ttsim/releases/download/v1.10.6/libttsim_bh_x2.so
+        https://github.com/tenstorrent/ttsim/releases/download/v1.10.8/libttsim_bh_x2.so
 COPY soc_descriptor_bh.yaml /opt/sim/bh_x2/soc_descriptor.yaml
 COPY blackhole_P300_both_mmio.yaml /opt/sim/bh_x2/cluster_descriptor.yaml
 

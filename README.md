@@ -19,7 +19,7 @@ anywhere in this container. Type code into the editor, pick a backend, hit
 Run — it streams back real output from a real (virtual) chip.
 
 Backed by Tenstorrent's official pip-installable `ttnn` wheel plus ttsim
-built from source (pinned to `v1.10.6`, the latest release). A wide-matmul
+built from source (pinned to `v1.10.8`, the latest release). A wide-matmul
 regression briefly forced a pin back to `v1.10.1` for one demo; as of
 2026-09-09 it no longer reproduces on either version (an unrelated `tt-metal`
 base-image update, not a ttsim fix) — see the Dockerfile for the history.
