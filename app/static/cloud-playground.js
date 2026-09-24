@@ -214,7 +214,12 @@
         cfg = model.config
         n_layer, n_head, n_kv_head = cfg.num_hidden_layers, cfg.num_attention_heads, cfg.num_key_value_heads
         head_dim = cfg.hidden_size // n_head
-        eps, theta = cfg.rms_norm_eps, cfg.rope_theta
+        eps = cfg.rms_norm_eps
+        # transformers >=5 moved rope_theta off the config into a nested
+        # rope_parameters dict; this reads either shape.
+        theta = getattr(cfg, "rope_theta", None)
+        if theta is None:
+            theta = cfg.rope_parameters["rope_theta"]
         sd = model.state_dict()
 
         input_ids = tok(PROMPT, return_tensors="pt").input_ids
