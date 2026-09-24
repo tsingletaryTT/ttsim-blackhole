@@ -144,8 +144,14 @@
     display: flex; flex-direction: column;
   }
   .tt-pg-editor-col:focus-within { border-color: var(--teal); }
-  .tt-pg-output-header { font-size: 9px; letter-spacing: 1.8px; text-transform: uppercase;
-                         color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--bg2); flex: 0 0 auto; }
+  .tt-pg-output-header { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--bg2); flex: 0 0 auto; }
+  .tt-pg-output-tab {
+    background: none; color: var(--muted); border: none; font-weight: 700;
+    font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+    padding: 7px 10px 8px; cursor: pointer; border-bottom: 2px solid transparent; border-radius: 0;
+  }
+  .tt-pg-output-tab:hover { color: var(--text); filter: none; }
+  .tt-pg-output-tab.active { color: var(--teal-lt); border-bottom-color: var(--teal); }
   .tt-pg-code, .tt-pg-output {
     flex: 1; min-height: 0; width: 100%; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
     font-size: 12.5px; background: var(--bg3); color: var(--text); border: none;
@@ -153,6 +159,7 @@
   }
   .tt-pg-code:focus { outline: none; }
   .tt-pg-output { overflow: auto; white-space: pre-wrap; color: var(--teal-lt); }
+  .tt-pg-output[hidden] { display: none; }
   .tt-pg-stderr { color: var(--red); }
   .tt-pg-ok { color: var(--green); }
 

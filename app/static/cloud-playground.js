@@ -302,13 +302,15 @@
 
                 # Embedding lookup: token IDs -> dense vectors, the very
                 # first operation in every transformer forward pass.
+                # ttnn.embedding requires uint32 ids and a bfloat16 table --
+                # int32/float32 fail with a TT_FATAL dtype assertion.
                 vocab, d_model, n_tokens = 256, 64, 16
                 torch.manual_seed(0)
                 table_np = np.random.randn(vocab, d_model).astype(np.float32)
                 ids_np = np.random.randint(0, vocab, size=(1, n_tokens)).astype(np.int32)
 
-                table = ttnn.from_torch(torch.from_numpy(table_np), layout=ttnn.TILE_LAYOUT, device=device)
-                ids = ttnn.from_torch(torch.from_numpy(ids_np), device=device)
+                table = ttnn.from_torch(torch.from_numpy(table_np).bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                ids = ttnn.from_torch(torch.from_numpy(ids_np), dtype=ttnn.uint32, device=device)
                 y = ttnn.embedding(ids, table)
                 result = ttnn.to_torch(ttnn.from_device(y)).float().numpy().reshape(n_tokens, d_model)
 
@@ -723,6 +725,7 @@
             this._currentKey = null;
             this._currentModel = null;
             this._activeCategory = KERNELS['hello_tensor'].category;
+            this._activeOutputTab = 'output';
             this._pendingLineEl = { stdout: null, stderr: null };
             this._pendingLineText = { stdout: '', stderr: '' };
 
@@ -761,8 +764,12 @@
         <textarea class="tt-pg-code" id="tt-pg-code" spellcheck="false"></textarea>
       </div>
       <div class="tt-pg-output-col">
-        <div class="tt-pg-output-header">Output</div>
-        <pre class="tt-pg-output" id="tt-pg-output"></pre>
+        <div class="tt-pg-output-header">
+          <button class="tt-pg-output-tab active" data-pane="output" type="button">Output</button>
+          <button class="tt-pg-output-tab" data-pane="logs" type="button">Logs</button>
+        </div>
+        <pre class="tt-pg-output" id="tt-pg-output-output"></pre>
+        <pre class="tt-pg-output" id="tt-pg-output-logs" hidden></pre>
       </div>
     </div>
   </div>
@@ -794,7 +801,14 @@
 
             this._noticeEl = this._mount.querySelector('#tt-pg-cloud-notice');
             this._codeEl = this._mount.querySelector('#tt-pg-code');
-            this._outputEl = this._mount.querySelector('#tt-pg-output');
+            this._outputPanes = {
+                output: this._mount.querySelector('#tt-pg-output-output'),
+                logs: this._mount.querySelector('#tt-pg-output-logs'),
+            };
+            this._outputTabEls = this._mount.querySelectorAll('.tt-pg-output-tab');
+            this._outputTabEls.forEach(tab => {
+                tab.addEventListener('click', () => this._setOutputTab(tab.dataset.pane));
+            });
             this._runBtn = this._mount.querySelector('#tt-pg-run');
             this._activeLabelEl = this._mount.querySelector('#tt-pg-active-label');
             this._modelPickerEl = this._mount.querySelector('#tt-pg-model-picker');
@@ -956,12 +970,23 @@
                 });
         }
 
+        _setOutputTab(pane) {
+            this._activeOutputTab = pane;
+            this._outputTabEls.forEach(tab => tab.classList.toggle('active', tab.dataset.pane === pane));
+            Object.entries(this._outputPanes).forEach(([key, el]) => { el.hidden = key !== pane; });
+        }
+
+        // A one-off system message (run errors, exit status) -- shown in
+        // both panes so the pass/fail result is visible regardless of which
+        // tab is active.
         _appendOutput(text, cls) {
-            const span = document.createElement('span');
-            if (cls) span.className = cls;
-            span.textContent = text;
-            this._outputEl.appendChild(span);
-            this._outputEl.scrollTop = this._outputEl.scrollHeight;
+            Object.values(this._outputPanes).forEach(pane => {
+                const span = document.createElement('span');
+                if (cls) span.className = cls;
+                span.textContent = text;
+                pane.appendChild(span);
+                pane.scrollTop = pane.scrollHeight;
+            });
         }
 
         // Classifies a line of stdout/stderr the way ttnn/spdlog would color
@@ -969,47 +994,58 @@
         // a tty, so spdlog itself never emits ANSI codes to pass through;
         // this reproduces the same severity coloring from the level tag
         // ttnn's logger already prints in every line ("... | warning | ...").
+        // A matched level tag also means this is framework log noise, not
+        // the kernel's own print() output -- routed to the "logs" pane so
+        // the "output" pane stays just the program's own result.
         _classifyLine(line, streamKey) {
             const m = line.match(/\|\s*(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|ERR|CRITICAL)\s*\|/i);
             if (m) {
                 const lvl = m[1].toLowerCase();
-                if (lvl.startsWith('warn')) return 'tt-pg-log-warn';
-                if (lvl === 'err' || lvl === 'error') return 'tt-pg-log-error';
-                if (lvl === 'critical') return 'tt-pg-log-critical';
-                if (lvl === 'debug') return 'tt-pg-log-debug';
-                if (lvl === 'trace') return 'tt-pg-log-trace';
-                if (lvl === 'info') return 'tt-pg-log-info';
+                let cls;
+                if (lvl.startsWith('warn')) cls = 'tt-pg-log-warn';
+                else if (lvl === 'err' || lvl === 'error') cls = 'tt-pg-log-error';
+                else if (lvl === 'critical') cls = 'tt-pg-log-critical';
+                else if (lvl === 'debug') cls = 'tt-pg-log-debug';
+                else if (lvl === 'trace') cls = 'tt-pg-log-trace';
+                else cls = 'tt-pg-log-info';
+                return { cls, pane: 'logs' };
             }
-            return streamKey === 'stderr' ? 'tt-pg-stderr' : 'tt-pg-stdout';
+            return { cls: streamKey === 'stderr' ? 'tt-pg-stderr' : 'tt-pg-stdout', pane: 'output' };
         }
 
-        // Appends streamed text line-by-line, classifying+coloring each line
-        // as soon as it's complete (a chunk boundary rarely lands mid-line,
-        // so this stays effectively real-time) while still growing the
-        // in-progress line's span incrementally for live streaming feel.
+        // Appends streamed text line-by-line, classifying each line as soon
+        // as it's complete (a chunk boundary rarely lands mid-line, so this
+        // stays effectively real-time) while still growing the in-progress
+        // line's span incrementally for live streaming feel. Re-parenting an
+        // in-progress span into its (possibly newly decided) pane on every
+        // update also correctly handles the rare case where a chunk splits
+        // before the log-level tag is visible yet.
         _appendStreamText(streamKey, text) {
             const parts = text.split('\n');
             for (let i = 0; i < parts.length; i++) {
                 if (!this._pendingLineEl[streamKey]) {
                     this._pendingLineEl[streamKey] = document.createElement('span');
-                    this._outputEl.appendChild(this._pendingLineEl[streamKey]);
                     this._pendingLineText[streamKey] = '';
                 }
                 this._pendingLineText[streamKey] += parts[i];
-                this._pendingLineEl[streamKey].textContent = this._pendingLineText[streamKey];
-                this._pendingLineEl[streamKey].className = this._classifyLine(this._pendingLineText[streamKey], streamKey);
+                const el = this._pendingLineEl[streamKey];
+                const { cls, pane } = this._classifyLine(this._pendingLineText[streamKey], streamKey);
+                el.textContent = this._pendingLineText[streamKey];
+                el.className = cls;
+                const paneEl = this._outputPanes[pane];
+                if (el.parentNode !== paneEl) paneEl.appendChild(el);
 
                 if (i < parts.length - 1) {
-                    this._outputEl.appendChild(document.createTextNode('\n'));
+                    paneEl.appendChild(document.createTextNode('\n'));
                     this._pendingLineEl[streamKey] = null;
                     this._pendingLineText[streamKey] = '';
                 }
             }
-            this._outputEl.scrollTop = this._outputEl.scrollHeight;
+            Object.values(this._outputPanes).forEach(pane => { pane.scrollTop = pane.scrollHeight; });
         }
 
         _clearOutput() {
-            this._outputEl.textContent = '';
+            Object.values(this._outputPanes).forEach(pane => { pane.textContent = ''; });
             this._pendingLineEl = { stdout: null, stderr: null };
             this._pendingLineText = { stdout: '', stderr: '' };
         }
