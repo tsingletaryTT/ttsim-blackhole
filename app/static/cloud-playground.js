@@ -725,7 +725,8 @@
             this._currentKey = null;
             this._currentModel = null;
             this._activeCategory = KERNELS['hello_tensor'].category;
-            this._activeOutputTab = 'output';
+            this._activeOutputTab = 'logs';
+            this._paneLineCounts = { output: 0, logs: 0 };
             this._pendingLineEl = { stdout: null, stderr: null };
             this._pendingLineText = { stdout: '', stderr: '' };
 
@@ -765,11 +766,11 @@
       </div>
       <div class="tt-pg-output-col">
         <div class="tt-pg-output-header">
-          <button class="tt-pg-output-tab active" data-pane="output" type="button">Output</button>
-          <button class="tt-pg-output-tab" data-pane="logs" type="button">Logs</button>
+          <button class="tt-pg-output-tab" data-pane="output" type="button">Output</button>
+          <button class="tt-pg-output-tab active" data-pane="logs" type="button">Logs</button>
         </div>
-        <pre class="tt-pg-output" id="tt-pg-output-output"></pre>
-        <pre class="tt-pg-output" id="tt-pg-output-logs" hidden></pre>
+        <pre class="tt-pg-output" id="tt-pg-output-output" hidden></pre>
+        <pre class="tt-pg-output" id="tt-pg-output-logs"></pre>
       </div>
     </div>
   </div>
@@ -976,6 +977,17 @@
             Object.entries(this._outputPanes).forEach(([key, el]) => { el.hidden = key !== pane; });
         }
 
+        // Updates a tab's label to "Output (5)" / "Logs (12)" once that pane
+        // has lines in it (CSS uppercases the text, so this stays lowercase
+        // here); reverts to the bare label at zero.
+        _updateTabLabel(pane) {
+            const tab = this._mount.querySelector(`.tt-pg-output-tab[data-pane="${pane}"]`);
+            if (!tab) return;
+            const base = pane === 'logs' ? 'Logs' : 'Output';
+            const count = this._paneLineCounts[pane];
+            tab.textContent = count > 0 ? `${base} (${count})` : base;
+        }
+
         // A one-off system message (run errors, exit status) -- shown in
         // both panes so the pass/fail result is visible regardless of which
         // tab is active.
@@ -1039,6 +1051,8 @@
                     paneEl.appendChild(document.createTextNode('\n'));
                     this._pendingLineEl[streamKey] = null;
                     this._pendingLineText[streamKey] = '';
+                    this._paneLineCounts[pane]++;
+                    this._updateTabLabel(pane);
                 }
             }
             Object.values(this._outputPanes).forEach(pane => { pane.scrollTop = pane.scrollHeight; });
@@ -1048,6 +1062,9 @@
             Object.values(this._outputPanes).forEach(pane => { pane.textContent = ''; });
             this._pendingLineEl = { stdout: null, stderr: null };
             this._pendingLineText = { stdout: '', stderr: '' };
+            this._paneLineCounts = { output: 0, logs: 0 };
+            this._updateTabLabel('output');
+            this._updateTabLabel('logs');
         }
 
         _run() {
