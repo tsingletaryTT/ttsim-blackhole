@@ -54,10 +54,20 @@ COPY blackhole_P300_both_mmio.yaml /opt/sim/bh_x2/cluster_descriptor.yaml
 # CPU-only torch + transformers (for real HF-checkpoint demos) and the API
 # server's own deps, all into the same venv that already has ttnn -- one
 # process, one interpreter, no dev-checkout PYTHONPATH tricks needed.
+#
+# transformers is pinned: an earlier unpinned install drifted from 4.52.4 to
+# the newly-released 5.x line, which moved LlamaConfig.rope_theta into a
+# nested rope_parameters dict and broke the tt-tnt kernel with an
+# AttributeError in the deployed Space (GPT2Config was unaffected -- only
+# Llama's RoPE fields moved). The kernel itself now reads rope_theta via a
+# version-tolerant fallback (works on both shapes), but pin anyway so a
+# future transformers release can't silently reintroduce a different one of
+# these without a deliberate version bump and re-verification, matching how
+# ttsim itself is pinned above.
 RUN uv pip install --python /opt/venv/bin/python3 \
         torch --index-url https://download.pytorch.org/whl/cpu \
     && uv pip install --python /opt/venv/bin/python3 \
-        transformers fastapi "uvicorn[standard]" websockets pydantic
+        "transformers==5.17.0" fastapi "uvicorn[standard]" websockets pydantic
 
 COPY app /app
 WORKDIR /app
