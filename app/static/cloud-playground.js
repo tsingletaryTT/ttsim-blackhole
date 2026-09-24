@@ -151,7 +151,26 @@
         print("PASSED")
     `);
 
-    const REAL_TNT_CODE = _dedent(`
+    const TNT_DEFAULT_PROMPT = 'Once upon a time, there was a little';
+    const TNT_MAX_PROMPT_LEN = 80;
+
+    // Embeds a user-supplied prompt into a Python double-quoted string
+    // literal safely: escape backslashes/quotes/newlines so the value can
+    // only ever be DATA inside PROMPT = "...", never code that escapes the
+    // literal, however it's crafted (this playground already lets anyone
+    // type and run arbitrary Python in the editor -- the point here isn't
+    // sandboxing, it's making sure a shared #demo-tt-tnt&prompt=... link
+    // can't be crafted to make someone else's browser submit code other
+    // than the prompt the link claims to carry).
+    function escapePythonStringLiteral(s) {
+        return s
+            .slice(0, TNT_MAX_PROMPT_LEN)
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\r?\n/g, '\\n');
+    }
+
+    const REAL_TNT_CODE = (_model, prompt) => _dedent(`
         # tt-tnt: a 123M-parameter Llama-3-style model trained from random
         # initialization ON Blackhole (via ttml/tt-train) -- not merely
         # trained elsewhere and ported here. Real weights, real architecture:
@@ -159,12 +178,20 @@
         # (16 query heads sharing 4 KV heads), SwiGLU MLP. Every one of those
         # pieces is written out below and run through ttnn on this simulated
         # chip, the same way the GPT-2 kernel does for its architecture.
+        #
+        # Generation is greedy (no sampling) and capped at a few tokens --
+        # ttsim functionally simulates every instruction the chip actually
+        # executes, so it's accurate but slow; each of these forward passes
+        # through all 8 layers costs real wall-clock seconds, and that cost
+        # compounds with every additional token. A handful of tokens is a
+        # deliberate choice, not a limitation of the architecture.
         import torch
         import torch.nn.functional as F
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         MODEL_ID = "episod/tt-tnt-1024"
-        PROMPT = "Once upon a time, there was a little"
+        PROMPT = "${escapePythonStringLiteral(prompt || TNT_DEFAULT_PROMPT)}"
+        MAX_NEW_TOKENS = 6
 
 
         def tt_matmul(x, w_T):
@@ -225,71 +252,83 @@
             theta = cfg.rope_parameters["rope_theta"]
         sd = model.state_dict()
 
-        input_ids = tok(PROMPT, return_tensors="pt").input_ids
-        seq_len = input_ids.shape[1]
-        print(f"Model: {MODEL_ID}  ({n_layer} layers, {n_head} heads / {n_kv_head} KV heads, trained on real Blackhole hardware)")
-        print(f"Prompt: {PROMPT!r} ({seq_len} tokens)")
-
         emb = sd["model.embed_tokens.weight"]
-        h = emb[input_ids[0]]
 
-        # Rotary position embeddings: precomputed cos/sin tables, applied to
-        # Q/K per layer below.
-        positions = torch.arange(seq_len)
-        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        freqs = torch.outer(positions.float(), inv_freq)
-        emb_ang = torch.cat((freqs, freqs), dim=-1)
-        cos, sin = emb_ang.cos(), emb_ang.sin()
 
-        mask = torch.triu(torch.full((seq_len, seq_len), float("-1e4")), diagonal=1)
-        mask = mask.unsqueeze(0).expand(n_head, seq_len, seq_len).contiguous()
+        def forward_last_logits(ids_1d):
+            # No KV cache: each call recomputes the full sequence, same as
+            # the single-shot GPT-2 kernel -- simplicity over speed. RoPE
+            # tables and the causal mask are rebuilt each call since the
+            # sequence length grows by one every generation step.
+            seq_len = len(ids_1d)
+            h = emb[torch.tensor(ids_1d)]
 
-        for i in range(n_layer):
-            p = f"model.layers.{i}."
-            ln1 = tt_rms_norm(h, sd[p + "input_layernorm.weight"], eps)
-            q = tt_matmul(ln1, sd[p + "self_attn.q_proj.weight"].T.contiguous())
-            k = tt_matmul(ln1, sd[p + "self_attn.k_proj.weight"].T.contiguous())
-            v = tt_matmul(ln1, sd[p + "self_attn.v_proj.weight"].T.contiguous())
+            positions = torch.arange(seq_len)
+            inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+            freqs = torch.outer(positions.float(), inv_freq)
+            emb_ang = torch.cat((freqs, freqs), dim=-1)
+            cos, sin = emb_ang.cos(), emb_ang.sin()
 
-            q = q.view(seq_len, n_head, head_dim).transpose(0, 1)
-            k = k.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
-            v = v.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
+            mask = torch.triu(torch.full((seq_len, seq_len), float("-1e4")), diagonal=1)
+            mask = mask.unsqueeze(0).expand(n_head, seq_len, seq_len).contiguous()
 
-            q, k = apply_rope(q, k, cos, sin)
-            k = repeat_kv(k, n_head // n_kv_head)
-            v = repeat_kv(v, n_head // n_kv_head)
+            for i in range(n_layer):
+                p = f"model.layers.{i}."
+                ln1 = tt_rms_norm(h, sd[p + "input_layernorm.weight"], eps)
+                q = tt_matmul(ln1, sd[p + "self_attn.q_proj.weight"].T.contiguous())
+                k = tt_matmul(ln1, sd[p + "self_attn.k_proj.weight"].T.contiguous())
+                v = tt_matmul(ln1, sd[p + "self_attn.v_proj.weight"].T.contiguous())
 
-            scale = head_dim ** -0.5
-            qt = ttnn.from_torch(q.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
-            kt = ttnn.from_torch(k.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
-            vt = ttnn.from_torch(v.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
-            maskt = ttnn.from_torch(mask.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
-            scores = ttnn.matmul(qt, ttnn.permute(kt, (0, 2, 1))) * scale
-            scores = scores + maskt
-            attn = ttnn.softmax(scores, dim=-1)
-            out_h = ttnn.to_torch(ttnn.from_device(ttnn.matmul(attn, vt))).float()
+                q = q.view(seq_len, n_head, head_dim).transpose(0, 1)
+                k = k.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
+                v = v.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
 
-            out = out_h.transpose(0, 1).contiguous().view(seq_len, -1)
-            out = tt_matmul(out, sd[p + "self_attn.o_proj.weight"].T.contiguous())
-            h = h + out
+                q, k = apply_rope(q, k, cos, sin)
+                k = repeat_kv(k, n_head // n_kv_head)
+                v = repeat_kv(v, n_head // n_kv_head)
 
-            ln2 = tt_rms_norm(h, sd[p + "post_attention_layernorm.weight"], eps)
-            gate = tt_matmul(ln2, sd[p + "mlp.gate_proj.weight"].T.contiguous())
-            up = tt_matmul(ln2, sd[p + "mlp.up_proj.weight"].T.contiguous())
-            mlp_out = tt_matmul(tt_multiply(tt_silu(gate), up), sd[p + "mlp.down_proj.weight"].T.contiguous())
-            h = h + mlp_out
+                scale = head_dim ** -0.5
+                qt = ttnn.from_torch(q.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                kt = ttnn.from_torch(k.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                vt = ttnn.from_torch(v.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                maskt = ttnn.from_torch(mask.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                scores = ttnn.matmul(qt, ttnn.permute(kt, (0, 2, 1))) * scale
+                scores = scores + maskt
+                attn = ttnn.softmax(scores, dim=-1)
+                out_h = ttnn.to_torch(ttnn.from_device(ttnn.matmul(attn, vt))).float()
 
-        h_final = tt_rms_norm(h, sd["model.norm.weight"], eps)
-        # tie_word_embeddings: the output projection IS the embedding table.
-        logits = tt_matmul(h_final[-1:], emb.T.contiguous())[0]
+                out = out_h.transpose(0, 1).contiguous().view(seq_len, -1)
+                out = tt_matmul(out, sd[p + "self_attn.o_proj.weight"].T.contiguous())
+                h = h + out
 
-        top5 = torch.topk(logits, 5)
-        next_word = tok.decode([int(logits.argmax().item())])
-        top5_words = [tok.decode([i]) for i in top5.indices.tolist()]
+                ln2 = tt_rms_norm(h, sd[p + "post_attention_layernorm.weight"], eps)
+                gate = tt_matmul(ln2, sd[p + "mlp.gate_proj.weight"].T.contiguous())
+                up = tt_matmul(ln2, sd[p + "mlp.up_proj.weight"].T.contiguous())
+                mlp_out = tt_matmul(tt_multiply(tt_silu(gate), up), sd[p + "mlp.down_proj.weight"].T.contiguous())
+                h = h + mlp_out
 
-        print(f"ttsim (Blackhole, {n_layer} real layers) predicts: {next_word!r}")
-        print(f"top-5: {list(zip(top5_words, [round(v, 2) for v in top5.values.tolist()]))}")
-        print(f"Continuation: {PROMPT}{next_word}")
+            h_final = tt_rms_norm(h, sd["model.norm.weight"], eps)
+            # tie_word_embeddings: the output projection IS the embedding table.
+            return tt_matmul(h_final[-1:], emb.T.contiguous())[0]
+
+
+        input_ids = tok(PROMPT, return_tensors="pt").input_ids[0]
+        print(f"Model: {MODEL_ID}  ({n_layer} layers, {n_head} heads / {n_kv_head} KV heads, trained on real Blackhole hardware)")
+        print(f"Prompt: {PROMPT!r} ({len(input_ids)} tokens)")
+
+        generated = input_ids.tolist()
+        new_ids = []
+        for step in range(MAX_NEW_TOKENS):
+            logits = forward_last_logits(generated)
+            next_id = int(logits.argmax().item())
+            generated.append(next_id)
+            new_ids.append(next_id)
+            print(f"  + {tok.decode([next_id])!r}", flush=True)
+            if next_id == tok.eos_token_id:
+                break
+
+        print(f"ttsim (Blackhole, {n_layer} real layers), greedy, {len(new_ids)} tokens:")
+        print(f"Continuation: {tok.decode(generated, skip_special_tokens=True)!r}")
         print("PASSED")
     `);
 
@@ -412,6 +451,13 @@
             tag: '~250MB download, first run',
             complexity: 3,
             backend: 'ttsim-bh',
+            promptable: true,
+            // ttsim is a functional (instruction-accurate) simulator, not a
+            // performance one -- 6 real forward passes through all 8 layers
+            // genuinely costs minutes of wall-clock time. Overrides the
+            // default 180s the client normally requests; the server still
+            // caps every request at 300s regardless (see api_server.py).
+            timeout: 280,
             code: REAL_TNT_CODE,
         },
         'softmax_only': {
@@ -906,6 +952,7 @@
             this._running = false;
             this._currentKey = null;
             this._currentModel = null;
+            this._currentPrompt = null;
             this._activeCategory = KERNELS['hello_tensor'].category;
             this._activeOutputTab = 'logs';
             this._paneLineCounts = { output: 0, logs: 0 };
@@ -926,18 +973,34 @@
         }
 
         // Returns true if the hash matched a known category or kernel.
+        // Format: #demo-<slug>[&key=value...] or #sec-<slug>. The part
+        // after '&' isn't real query-string syntax (it's still inside the
+        // fragment), just a convention parsed the same way, so links stay
+        // readable and copy/pasteable.
         _applyHash(hash) {
             const raw = (hash || '').replace(/^#/, '');
             if (!raw) return false;
-            if (raw.startsWith('demo-')) {
-                const key = kernelKeyFromSlug(raw.slice('demo-'.length));
+            const [primary, ...rest] = raw.split('&');
+            const params = {};
+            for (const part of rest) {
+                const eq = part.indexOf('=');
+                if (eq === -1) continue;
+                try {
+                    params[decodeURIComponent(part.slice(0, eq))] = decodeURIComponent(part.slice(eq + 1));
+                } catch {
+                    // malformed percent-encoding in a hand-edited link -- ignore that param
+                }
+            }
+
+            if (primary.startsWith('demo-')) {
+                const key = kernelKeyFromSlug(primary.slice('demo-'.length));
                 if (!KERNELS[key]) return false;
                 this._setCategory(KERNELS[key].category);
-                this._selectKernel(key);
+                this._selectKernel(key, { prompt: params.prompt });
                 return true;
             }
-            if (raw.startsWith('sec-')) {
-                const slug = raw.slice('sec-'.length);
+            if (primary.startsWith('sec-')) {
+                const slug = primary.slice('sec-'.length);
                 const cat = CATEGORIES.find(c => c.slug === slug);
                 if (!cat) return false;
                 this._setCategory(cat.key);
@@ -1107,10 +1170,15 @@
             if (card) card.focus();
         }
 
-        _selectKernel(key) {
+        // `opts.prompt` restores a custom prompt from a deep link
+        // (#demo-tt-tnt&prompt=...); only kernels marked `promptable` use
+        // it, and any other selection path (a plain card click, Surprise
+        // me) always resets to that kernel's own default prompt.
+        _selectKernel(key, opts = {}) {
             const entry = KERNELS[key];
             if (!entry) return;
             this._currentKey = key;
+            this._currentPrompt = (entry.promptable && opts.prompt) ? opts.prompt : null;
 
             this._mount.querySelectorAll('.tt-pg-card').forEach(card => {
                 card.classList.toggle('active', card.dataset.key === key);
@@ -1132,14 +1200,17 @@
                 this._modelPickerEl.hidden = true;
             }
 
-            window.history.replaceState(null, '', `#demo-${kernelSlug(key)}`);
+            const promptParam = (entry.promptable && this._currentPrompt)
+                ? `&prompt=${encodeURIComponent(this._currentPrompt)}`
+                : '';
+            window.history.replaceState(null, '', `#demo-${kernelSlug(key)}${promptParam}`);
             this._loadCode();
         }
 
         _loadCode() {
             const entry = KERNELS[this._currentKey];
             if (!entry) return;
-            const code = typeof entry.code === 'function' ? entry.code(this._currentModel) : entry.code;
+            const code = typeof entry.code === 'function' ? entry.code(this._currentModel, this._currentPrompt) : entry.code;
             if (this._cm) this._cm.setValue(code.trim());
             else this._codeEl.value = code.trim();
         }
@@ -1352,10 +1423,13 @@
             }
 
             this._ws.onopen = () => {
-                // 180s: enough for a cold checkpoint download (Real HF Checkpoint,
-                // first run) plus device init + kernel JIT on a modest CPU tier.
-                // Server caps at 300s regardless (see api_server.py).
-                this._ws.send(JSON.stringify({ code: fullCode, backend, timeout: 180 }));
+                // 180s default: enough for a cold checkpoint download (Real HF
+                // Checkpoint, first run) plus device init + kernel JIT on a
+                // modest CPU tier. A kernel can request more (see tt-tnt's
+                // multi-step generation loop); the server still caps every
+                // request at 300s regardless (see api_server.py).
+                const timeout = entry.timeout || 180;
+                this._ws.send(JSON.stringify({ code: fullCode, backend, timeout }));
             };
 
             this._ws.onmessage = (evt) => {
