@@ -655,6 +655,62 @@
                 print("PASSED" if max_err < 0.5 else "FAILED")
             `),
         },
+        'game_of_life': {
+            category: 'dsp',
+            label: "Conway's Game of Life",
+            blurb: 'Neighbor counts computed by the same im2col + matmul trick as Sobel edge detection -- six generations of a cellular automaton, rendered as ASCII.',
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # Conway's Game of Life: still just im2col + matmul (the
+                # same trick as the Sobel Edge Detection kernel), with a
+                # different 3x3 kernel -- "count the 8 neighbors" -- and an
+                # elementwise birth/death rule applied on the host.
+                H, W = 16, 32
+                GENERATIONS = 6
+
+                rng = np.random.RandomState(0)
+                grid = (rng.rand(H, W) < 0.35).astype(np.float32)  # random soup seed
+
+                neighbor_kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float32)
+                kernel_t = ttnn.from_torch(torch.from_numpy(neighbor_kernel.reshape(9, 1)), layout=ttnn.TILE_LAYOUT, device=device)
+
+                def im2col(mat):
+                    padded = np.pad(mat, 1, mode='constant')
+                    return np.stack([
+                        padded[i:i + H, j:j + W].reshape(-1)
+                        for i in range(3) for j in range(3)
+                    ], axis=1)
+
+                def render(mat):
+                    return "\\n".join("".join("#" if v > 0.5 else "." for v in row) for row in mat)
+
+                print(f"Generation 0 ({int(grid.sum())} live cells):")
+                print(render(grid))
+
+                max_err = 0.0
+                for gen in range(1, GENERATIONS + 1):
+                    patches = im2col(grid)
+                    patches_t = ttnn.from_torch(torch.from_numpy(patches), layout=ttnn.TILE_LAYOUT, device=device)
+                    neighbors = ttnn.to_torch(ttnn.from_device(ttnn.matmul(patches_t, kernel_t))).numpy().reshape(-1)[:H * W].reshape(H, W)
+
+                    ref_neighbors = (patches @ neighbor_kernel.reshape(-1)).reshape(H, W)
+                    max_err = max(max_err, float(np.abs(neighbors - ref_neighbors).max()))
+
+                    # B3/S23: a live cell with 2 or 3 neighbors survives; a
+                    # dead cell with exactly 3 neighbors is born.
+                    alive = grid > 0.5
+                    grid = (((alive) & ((neighbors == 2) | (neighbors == 3))) | ((~alive) & (neighbors == 3))).astype(np.float32)
+                    print(f"\\nGeneration {gen} ({int(grid.sum())} live cells):")
+                    print(render(grid))
+
+                print(f"\\nmax_err (ttnn matmul vs numpy neighbor count) across {GENERATIONS} generations: {max_err:.4f}")
+                print("PASSED" if max_err < 0.5 else "FAILED")
+            `),
+        },
     };
 
     // ─── CloudPlaygroundController ────────────────────────────────────────────
@@ -667,6 +723,8 @@
             this._currentKey = null;
             this._currentModel = null;
             this._activeCategory = KERNELS['hello_tensor'].category;
+            this._pendingLineEl = { stdout: null, stderr: null };
+            this._pendingLineText = { stdout: '', stderr: '' };
 
             this._buildUI();
             this._setCategory(this._activeCategory);
@@ -741,6 +799,20 @@
             this._activeLabelEl = this._mount.querySelector('#tt-pg-active-label');
             this._modelPickerEl = this._mount.querySelector('#tt-pg-model-picker');
             this._modelSelEl = modelSel;
+
+            // Syntax highlighting via CodeMirror, loaded from CDN. Falls back
+            // to the plain textarea (still fully functional) if it failed to
+            // load -- e.g. offline, or a blocked third-party script.
+            this._cm = (typeof window.CodeMirror !== 'undefined')
+                ? window.CodeMirror.fromTextArea(this._codeEl, {
+                    mode: 'python',
+                    indentUnit: 4,
+                    tabSize: 4,
+                    indentWithTabs: false,
+                    lineNumbers: true,
+                    viewportMargin: Infinity,
+                })
+                : null;
 
             this._showCloudStatus();
         }
@@ -838,7 +910,8 @@
             const entry = KERNELS[this._currentKey];
             if (!entry) return;
             const code = typeof entry.code === 'function' ? entry.code(this._currentModel) : entry.code;
-            this._codeEl.value = code.trim();
+            if (this._cm) this._cm.setValue(code.trim());
+            else this._codeEl.value = code.trim();
         }
 
         _showCloudStatus() {
@@ -891,8 +964,54 @@
             this._outputEl.scrollTop = this._outputEl.scrollHeight;
         }
 
+        // Classifies a line of stdout/stderr the way ttnn/spdlog would color
+        // it in a real terminal -- our subprocess captures a plain pipe, not
+        // a tty, so spdlog itself never emits ANSI codes to pass through;
+        // this reproduces the same severity coloring from the level tag
+        // ttnn's logger already prints in every line ("... | warning | ...").
+        _classifyLine(line, streamKey) {
+            const m = line.match(/\|\s*(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|ERR|CRITICAL)\s*\|/i);
+            if (m) {
+                const lvl = m[1].toLowerCase();
+                if (lvl.startsWith('warn')) return 'tt-pg-log-warn';
+                if (lvl === 'err' || lvl === 'error') return 'tt-pg-log-error';
+                if (lvl === 'critical') return 'tt-pg-log-critical';
+                if (lvl === 'debug') return 'tt-pg-log-debug';
+                if (lvl === 'trace') return 'tt-pg-log-trace';
+                if (lvl === 'info') return 'tt-pg-log-info';
+            }
+            return streamKey === 'stderr' ? 'tt-pg-stderr' : 'tt-pg-stdout';
+        }
+
+        // Appends streamed text line-by-line, classifying+coloring each line
+        // as soon as it's complete (a chunk boundary rarely lands mid-line,
+        // so this stays effectively real-time) while still growing the
+        // in-progress line's span incrementally for live streaming feel.
+        _appendStreamText(streamKey, text) {
+            const parts = text.split('\n');
+            for (let i = 0; i < parts.length; i++) {
+                if (!this._pendingLineEl[streamKey]) {
+                    this._pendingLineEl[streamKey] = document.createElement('span');
+                    this._outputEl.appendChild(this._pendingLineEl[streamKey]);
+                    this._pendingLineText[streamKey] = '';
+                }
+                this._pendingLineText[streamKey] += parts[i];
+                this._pendingLineEl[streamKey].textContent = this._pendingLineText[streamKey];
+                this._pendingLineEl[streamKey].className = this._classifyLine(this._pendingLineText[streamKey], streamKey);
+
+                if (i < parts.length - 1) {
+                    this._outputEl.appendChild(document.createTextNode('\n'));
+                    this._pendingLineEl[streamKey] = null;
+                    this._pendingLineText[streamKey] = '';
+                }
+            }
+            this._outputEl.scrollTop = this._outputEl.scrollHeight;
+        }
+
         _clearOutput() {
             this._outputEl.textContent = '';
+            this._pendingLineEl = { stdout: null, stderr: null };
+            this._pendingLineText = { stdout: '', stderr: '' };
         }
 
         _run() {
@@ -907,7 +1026,7 @@
             this._runBtn.disabled = true;
             this._runBtn.textContent = '⏳ Running…';
 
-            const code = this._codeEl.value;
+            const code = this._cm ? this._cm.getValue() : this._codeEl.value;
 
             // Kernels that manage their own device (e.g. the mesh demo, via
             // ttnn.open_mesh_device) skip the auto-opened single `device`.
@@ -942,9 +1061,9 @@
                 let msg;
                 try { msg = JSON.parse(evt.data); } catch { return; }
                 if (msg.type === 'stdout') {
-                    this._appendOutput(msg.data, 'tt-pg-stdout');
+                    this._appendStreamText('stdout', msg.data);
                 } else if (msg.type === 'stderr') {
-                    this._appendOutput(msg.data, 'tt-pg-stderr');
+                    this._appendStreamText('stderr', msg.data);
                 } else if (msg.type === 'error') {
                     this._appendOutput(`Error: ${msg.data}\n`, 'tt-pg-stderr');
                 } else if (msg.type === 'exit') {

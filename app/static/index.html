@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ttsim-blackhole</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
 <style>
   /* Palette lifted from tenstorrent/tt-awesome's site theme, for visual
      consistency with the rest of the Tenstorrent dev-tool ecosystem. */
@@ -133,10 +136,10 @@
   .tt-pg-model-picker:not([hidden]) { display: flex; align-items: center; gap: 6px; }
   .tt-pg-label { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
 
-  /* ── Editor / output layout ──────────────────────────────────────────── */
-  .tt-pg-layout { flex: 1; min-height: 0; display: flex; gap: 16px; flex-wrap: wrap; }
+  /* ── Editor / output layout -- stacked, both full width ─────────────── */
+  .tt-pg-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
   .tt-pg-editor-col, .tt-pg-output-col {
-    flex: 1; min-width: 300px; min-height: 200px; background: var(--bg1); border: 1px solid var(--bg2);
+    flex: 1; min-height: 120px; background: var(--bg1); border: 1px solid var(--bg2);
     border-radius: 10px; overflow: hidden; transition: border-color 0.18s;
     display: flex; flex-direction: column;
   }
@@ -153,12 +156,36 @@
   .tt-pg-stderr { color: var(--red); }
   .tt-pg-ok { color: var(--green); }
 
+  /* ── Log-level colors, matching ttnn/spdlog's own terminal palette ──── */
+  .tt-pg-log-trace { color: var(--muted); }
+  .tt-pg-log-debug { color: #7fb3d5; }
+  .tt-pg-log-info { color: var(--teal-lt); }
+  .tt-pg-log-warn { color: var(--gold); }
+  .tt-pg-log-error { color: var(--red); font-weight: 600; }
+  .tt-pg-log-critical { color: #fff; background: var(--red); border-radius: 2px; padding: 0 3px; }
+
+  /* ── CodeMirror, restyled onto our palette instead of a stock theme ─── */
+  .tt-pg-editor-col .CodeMirror {
+    flex: 1; min-height: 0; height: auto; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+    font-size: 12.5px; background: var(--bg3); color: var(--text);
+  }
+  .CodeMirror-gutters { background: var(--bg3); border-right: 1px solid var(--bg2); }
+  .CodeMirror-linenumber { color: var(--muted); }
+  .CodeMirror-cursor { border-left: 1px solid var(--teal-lt); }
+  .cm-s-default .cm-keyword { color: var(--teal); font-weight: 600; }
+  .cm-s-default .cm-def, .cm-s-default .cm-variable-2 { color: var(--teal-lt); }
+  .cm-s-default .cm-string, .cm-s-default .cm-string-2 { color: var(--gold); }
+  .cm-s-default .cm-number { color: var(--pink); }
+  .cm-s-default .cm-comment { color: var(--muted); font-style: italic; }
+  .cm-s-default .cm-operator { color: var(--text2); }
+  .cm-s-default .cm-builtin, .cm-s-default .cm-atom { color: var(--pink); }
+  .cm-s-default .cm-property { color: var(--text2); }
+
   @media (max-width: 900px) {
     .tt-pg-workspace { flex-direction: column; height: auto; }
     .tt-pg-browse-col, .tt-pg-do-col { min-width: 0; }
     .tt-pg-card-grid { max-height: 320px; }
-    .tt-pg-layout { flex-direction: column; }
-    .tt-pg-editor-col, .tt-pg-output-col { height: 340px; flex: none; }
+    .tt-pg-editor-col, .tt-pg-output-col { height: 320px; flex: none; }
   }
 
   .footer { padding: 10px 20px; flex: 0 0 auto; display: flex; gap: 20px; flex-wrap: wrap; }
