@@ -24,15 +24,19 @@
 
     const CATEGORIES = [
         { key: 'start', label: 'Start Here', desc: 'The smallest useful programs. No AI, no chip lore required.' },
+        { key: 'ops', label: 'Op Zoo', desc: 'More of the primitives a transformer leans on, isolated and checked one at a time.' },
         { key: 'model', label: 'Run a Real Model', desc: 'An actual HuggingFace checkpoint, real weights, a real prediction.' },
+        { key: 'scale', label: 'Bigger Compute', desc: 'Same primitives, turned up: a deeper model, real tensor parallelism across chips.' },
+        { key: 'precision', label: 'Precision & Numbers', desc: 'bfloat16 saves memory. It is not free. See what you gain and lose.' },
         { key: 'push', label: 'Push the Simulator', desc: 'ttsim is deliberately stricter than silicon. See what that means.' },
         { key: 'mesh', label: 'Multi-Chip', desc: 'Two virtual chips, one program — no second card required.' },
-        { key: 'dsp', label: 'Signal Processing', desc: 'An AI accelerator, repurposed as an audio filter.' },
+        { key: 'dsp', label: 'Signal Processing', desc: 'An AI accelerator, repurposed as an audio and image filter.' },
     ];
 
     // ─── Kernel snippets ───────────────────────────────────────────────────────
-    // Each entry: { category, label, blurb, tag?, backend, skipDevicePreamble?,
-    //               models? (for a model picker), code: string | (model) => string }
+    // Each entry: { category, label, blurb, tag?, complexity (1-3), backend,
+    //               skipDevicePreamble?, models? (for a model picker),
+    //               code: string | (model) => string }
 
     const REAL_MODEL_CODE = (modelId) => _dedent(`
         # Downloads a REAL HuggingFace checkpoint (first run only), runs every
@@ -149,6 +153,7 @@
             category: 'start',
             label: 'Hello Tensor',
             blurb: 'Two 2×2 matrices, added together, on a chip that does not physically exist on this machine.',
+            complexity: 1,
             backend: 'ttsim-bh',
             code: _dedent(`
                 import torch
@@ -164,6 +169,7 @@
             category: 'start',
             label: 'Element-wise Add',
             blurb: 'A 64×64 tile, added element by element, checked against a plain NumPy answer.',
+            complexity: 1,
             backend: 'ttsim-bh',
             code: _dedent(`
                 import numpy as np
@@ -191,6 +197,7 @@
             category: 'start',
             label: 'Matmul',
             blurb: 'Matrix multiplication — the single operation that does most of the work inside every transformer.',
+            complexity: 1,
             backend: 'ttsim-bh',
             code: _dedent(`
                 import numpy as np
@@ -216,17 +223,219 @@
             label: 'Real HF Checkpoint',
             blurb: 'Downloads a real, pretrained language model and runs its actual math — every transformer layer — through the simulator.',
             tag: '~300–500MB download, first run',
+            complexity: 2,
             backend: 'ttsim-bh',
             models: [
                 { value: 'distilgpt2', label: 'distilgpt2 (6 layers, faster)' },
                 { value: 'gpt2', label: 'gpt2 (12 layers, slower)' },
+                { value: 'gpt2-medium', label: 'gpt2-medium (24 layers, slowest)' },
             ],
             code: REAL_MODEL_CODE,
+        },
+        'softmax_only': {
+            category: 'ops',
+            label: 'Softmax',
+            blurb: 'Raw scores in, a probability distribution out — the last step of every attention head, isolated.',
+            complexity: 1,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # Softmax turns a row of raw scores into a probability
+                # distribution -- the operation that decides "how much
+                # attention" each token gets, run here on its own.
+                dim = 64
+                x_np = np.random.randn(dim, dim).astype(np.float32)
+                ref = np.exp(x_np - x_np.max(axis=-1, keepdims=True))
+                ref = ref / ref.sum(axis=-1, keepdims=True)
+
+                x = ttnn.from_torch(torch.from_numpy(x_np), layout=ttnn.TILE_LAYOUT, device=device)
+                y = ttnn.softmax(x, dim=-1)
+                result = ttnn.to_torch(ttnn.from_device(y)).numpy()
+
+                max_err = float(np.abs(result - ref).max())
+                print(f"softmax  dim={dim}x{dim}  max_err={max_err:.6f}")
+                print("PASSED" if max_err < 1e-2 else "FAILED")
+            `),
+        },
+        'reduction_ops': {
+            category: 'ops',
+            label: 'Row Reductions',
+            blurb: 'Sum, mean, and max along a row — the quiet arithmetic underneath every normalization and pooling layer.',
+            complexity: 1,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # Row-wise reductions -- sum, mean, max along the last axis.
+                # Every attention and normalization op leans on one of these.
+                dim = 64
+                x_np = np.random.rand(dim, dim).astype(np.float32)
+                x = ttnn.from_torch(torch.from_numpy(x_np), layout=ttnn.TILE_LAYOUT, device=device)
+
+                def reduce_row(op, ref_fn):
+                    y = ttnn.to_torch(ttnn.from_device(op(x, dim=-1))).numpy().reshape(-1)[:dim]
+                    ref = ref_fn(x_np, axis=-1)
+                    return float(np.abs(y - ref).max())
+
+                errs = {
+                    "sum": reduce_row(ttnn.sum, np.sum),
+                    "mean": reduce_row(ttnn.mean, np.mean),
+                    "max": reduce_row(ttnn.max, np.max),
+                }
+                for name, err in errs.items():
+                    print(f"{name}: max_err={err:.4f}")
+                print("PASSED" if all(e < 0.5 for e in errs.values()) else "FAILED")
+            `),
+        },
+        'embedding_lookup': {
+            category: 'ops',
+            label: 'Embedding Lookup',
+            blurb: 'Token IDs in, dense vectors out — the very first operation in every transformer forward pass.',
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # Embedding lookup: token IDs -> dense vectors, the very
+                # first operation in every transformer forward pass.
+                vocab, d_model, n_tokens = 256, 64, 16
+                torch.manual_seed(0)
+                table_np = np.random.randn(vocab, d_model).astype(np.float32)
+                ids_np = np.random.randint(0, vocab, size=(1, n_tokens)).astype(np.int32)
+
+                table = ttnn.from_torch(torch.from_numpy(table_np), layout=ttnn.TILE_LAYOUT, device=device)
+                ids = ttnn.from_torch(torch.from_numpy(ids_np), device=device)
+                y = ttnn.embedding(ids, table)
+                result = ttnn.to_torch(ttnn.from_device(y)).float().numpy().reshape(n_tokens, d_model)
+
+                ref = table_np[ids_np[0]]
+                max_err = float(np.abs(result - ref).max())
+                print(f"embedding lookup: {n_tokens} tokens -> {d_model}-dim vectors")
+                print(f"max_err={max_err:.6f}")
+                print("PASSED" if max_err < 1e-2 else "FAILED")
+            `),
+        },
+        'wide_matmul_regression': {
+            category: 'precision',
+            label: 'The Bug That Used To Break This',
+            blurb: 'The exact 768→3072 matmul shape that aborted ttsim for months. Fixed as of the pairing this Space now runs.',
+            tag: 'v1.10.7+ regression fix',
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # GPT-2-style MLP up-projection: 768 -> 3072 output free dim.
+                # This exact shape aborted ttsim v1.10.3-v1.10.6 with
+                # UnsupportedFunctionality: tensix_pacr: Disable_pack_zero_flags
+                # -- see this Space's Dockerfile for the full history. Fixed as
+                # of the tt-metal/ttnn pairing this Space now runs.
+                seq_len, d_model, d_ff = 32, 768, 3072
+                x_np = np.random.rand(seq_len, d_model).astype(np.float32)
+                w_np = np.random.rand(d_model, d_ff).astype(np.float32)
+                ref = x_np @ w_np
+
+                x = ttnn.from_torch(torch.from_numpy(x_np).bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                w = ttnn.from_torch(torch.from_numpy(w_np).bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+                y = ttnn.matmul(x, w)
+                result = ttnn.to_torch(ttnn.from_device(y)).float().numpy()
+
+                max_err = float(np.abs(result - ref).max())
+                print(f"wide matmul {seq_len}x{d_model} @ {d_model}x{d_ff} -> {seq_len}x{d_ff}")
+                print(f"max_err={max_err:.3f}")
+                print("PASSED" if max_err < ref.max() * 0.05 else "FAILED")
+            `),
+        },
+        'fp32_vs_bf16': {
+            category: 'precision',
+            label: 'Full Precision vs bfloat16',
+            blurb: 'The same matmul, run twice — once at fp32, once at the bfloat16 the chip actually stores tensors in.',
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # bfloat16 keeps fp32's exponent range but only 7 mantissa
+                # bits -- about 2-3 decimal digits. Every ttnn program on
+                # real silicon makes this tradeoff; here it's made twice,
+                # side by side.
+                dim = 128
+                a_np = np.random.rand(dim, dim).astype(np.float32)
+                b_np = np.random.rand(dim, dim).astype(np.float32)
+                ref = a_np @ b_np
+
+                def run(cast):
+                    a = ttnn.from_torch(cast(torch.from_numpy(a_np)), layout=ttnn.TILE_LAYOUT, device=device)
+                    b = ttnn.from_torch(cast(torch.from_numpy(b_np)), layout=ttnn.TILE_LAYOUT, device=device)
+                    return ttnn.to_torch(ttnn.from_device(ttnn.matmul(a, b))).float().numpy()
+
+                fp32_result = run(lambda t: t.float())
+                bf16_result = run(lambda t: t.bfloat16())
+
+                fp32_err = float(np.abs(fp32_result - ref).max())
+                bf16_err = float(np.abs(bf16_result - ref).max())
+                print(f"matmul {dim}x{dim}, vs a float32 numpy reference")
+                print(f"fp32  max_err={fp32_err:.6f}")
+                print(f"bf16  max_err={bf16_err:.6f}  ({bf16_err / max(fp32_err, 1e-9):.0f}x larger)")
+                print("PASSED")
+            `),
+        },
+        'tensor_parallel_matmul': {
+            category: 'scale',
+            label: 'Tensor-Parallel Matmul',
+            blurb: 'A weight matrix split by column across two virtual chips — real tensor parallelism, the trick that fits bigger models on a cluster.',
+            tag: '2× Blackhole, tensor-parallel',
+            complexity: 3,
+            backend: 'ttsim-bh-x2',
+            skipDevicePreamble: true,
+            code: _dedent(`
+                # This one manages its own (mesh) device -- ttsim-bh-x2
+                # simulates a 2-chip Blackhole board (P300) over simulated
+                # Ethernet.
+                import torch
+
+                # Tensor parallelism: split a big weight matrix by COLUMN
+                # across two virtual chips, so each chip only computes its
+                # own shard of the output -- the same trick real multi-chip
+                # TT clusters use to fit a bigger model's weights.
+                mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2))
+                print("Opened mesh:", mesh)
+
+                d_model, d_ff = 256, 512  # d_ff splits 256/256 across the two chips
+                torch.manual_seed(0)
+                x = torch.randn(64, d_model, dtype=torch.bfloat16)
+                w = torch.randn(d_model, d_ff, dtype=torch.bfloat16)
+
+                # Activation: replicated (every chip needs the full input row)
+                x_mesh = ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=mesh,
+                                          mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                # Weight: column-sharded (chip 0 gets w[:, :256], chip 1 gets w[:, 256:])
+                w_mesh = ttnn.from_torch(w, layout=ttnn.TILE_LAYOUT, device=mesh,
+                                          mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=1))
+
+                # Each chip computes its own output shard, in parallel
+                y_mesh = ttnn.matmul(x_mesh, w_mesh)
+                y = ttnn.to_torch(y_mesh, mesh_composer=ttnn.ConcatMeshToTensor(mesh, dim=1))
+
+                ref = x.float() @ w.float()
+                max_err = (y.float() - ref).abs().max().item()
+                print(f"Tensor-parallel matmul: {tuple(x.shape)} @ {tuple(w.shape)} -> {tuple(y.shape)}, split across 2 chips")
+                print(f"Max error vs reference: {max_err:.3f}")
+                print("PASSED" if max_err < ref.abs().max().item() * 0.1 else "FAILED")
+                ttnn.close_mesh_device(mesh)
+            `),
         },
         'race_condition': {
             category: 'push',
             label: 'Race Condition',
             blurb: 'Comment out one line (marked below) and re-run. Silicon might let this slide; the simulator often will not.',
+            complexity: 2,
             backend: 'ttsim-bh',
             code: _dedent(`
                 # ttsim may evaluate operations in any order permitted by your
@@ -266,6 +475,7 @@
             label: 'Two Chips, One Tensor',
             blurb: 'Two virtual Blackhole chips, connected by simulated Ethernet, sharing one tensor operation.',
             tag: '2× Blackhole',
+            complexity: 2,
             backend: 'ttsim-bh-x2',
             skipDevicePreamble: true,
             code: _dedent(`
@@ -299,6 +509,7 @@
             category: 'dsp',
             label: 'Audio Filter on an AI Chip',
             blurb: 'A Butterworth lowpass filter — the kind of thing a $2 DSP chip does all day — verified against a float64 reference.',
+            complexity: 2,
             backend: 'ttsim-bh',
             code: _dedent(`
                 import numpy as np
@@ -351,6 +562,99 @@
                 print("PASSED" if max_err < 0.05 else "FAILED")
             `),
         },
+        'dft_matmul': {
+            category: 'dsp',
+            label: 'Fourier Transform via Matmul',
+            blurb: 'A DFT is just a matrix multiply against a fixed sine/cosine basis — no dedicated FFT hardware, only the same ttnn.matmul running the rest of this Space.',
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # A Discrete Fourier Transform is a matrix multiply against a
+                # fixed basis matrix of sines and cosines. Real ttnn matmul
+                # is real-valued only, so the complex DFT matrix is split
+                # into its real and imaginary halves and run as two matmuls.
+                N = 64
+                n = np.arange(N)
+                k = n.reshape(-1, 1)
+                dft_matrix = np.exp(-2j * np.pi * k * n / N)
+
+                t = np.linspace(0, 1, N, endpoint=False)
+                signal = (np.sin(2 * np.pi * 5 * t) + 0.5 * np.sin(2 * np.pi * 12 * t)).astype(np.float32)
+                ref = np.fft.fft(signal)
+
+                sig_t = ttnn.from_torch(torch.from_numpy(signal).reshape(N, 1), layout=ttnn.TILE_LAYOUT, device=device)
+                real_mat = ttnn.from_torch(torch.from_numpy(dft_matrix.real.astype(np.float32)), layout=ttnn.TILE_LAYOUT, device=device)
+                imag_mat = ttnn.from_torch(torch.from_numpy(dft_matrix.imag.astype(np.float32)), layout=ttnn.TILE_LAYOUT, device=device)
+
+                real_out = ttnn.to_torch(ttnn.from_device(ttnn.matmul(real_mat, sig_t))).numpy().reshape(-1)[:N]
+                imag_out = ttnn.to_torch(ttnn.from_device(ttnn.matmul(imag_mat, sig_t))).numpy().reshape(-1)[:N]
+
+                magnitude = np.sqrt(real_out ** 2 + imag_out ** 2)
+                ref_magnitude = np.abs(ref)
+
+                max_err = float(np.abs(magnitude - ref_magnitude).max())
+                peak_bin = int(magnitude[:N // 2].argmax())
+                print(f"DFT via matmul: {N}-sample signal, peak frequency bin = {peak_bin} (expected 5)")
+                print(f"max_err vs np.fft.fft magnitude: {max_err:.3f}")
+                print("PASSED" if max_err < ref_magnitude.max() * 0.1 else "FAILED")
+            `),
+        },
+        'sobel_edge': {
+            category: 'dsp',
+            label: 'Sobel Edge Detection',
+            blurb: "A 2D convolution, expressed as im2col + one big matmul — the same trick tt-metal's own conv2d op compiles down to. Edges rendered as ASCII art.",
+            complexity: 2,
+            backend: 'ttsim-bh',
+            code: _dedent(`
+                import numpy as np
+                import torch
+
+                # Convolution as matmul: every "3x3 patch dot Sobel kernel"
+                # at every pixel, batched into one ttnn.matmul call. This IS
+                # how tt-metal's own conv2d op is compiled under the hood --
+                # im2col (unroll patches into rows), then matmul.
+                H, W = 16, 24
+                img = np.zeros((H, W), dtype=np.float32)
+                img[:, W // 2:] = 1.0  # a hard vertical edge down the middle
+
+                sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+
+                padded = np.pad(img, 1, mode='edge')
+                patches = np.stack([
+                    padded[i:i + H, j:j + W].reshape(-1)
+                    for i in range(3) for j in range(3)
+                ], axis=1)  # (H*W, 9)
+
+                ref = (patches @ sobel_x.reshape(-1)).reshape(H, W)
+
+                patches_t = ttnn.from_torch(torch.from_numpy(patches), layout=ttnn.TILE_LAYOUT, device=device)
+                kernel_t = ttnn.from_torch(torch.from_numpy(sobel_x.reshape(9, 1)), layout=ttnn.TILE_LAYOUT, device=device)
+                out = ttnn.matmul(patches_t, kernel_t)
+                result = ttnn.to_torch(ttnn.from_device(out)).numpy().reshape(-1)[:H * W].reshape(H, W)
+
+                max_err = float(np.abs(result - ref).max())
+
+                def render(mat, chars=" .:-=+*#%@"):
+                    m = np.abs(mat)
+                    m = m / (m.max() + 1e-9)
+                    return "\\n".join(
+                        "".join(chars[min(int(v * (len(chars) - 1)), len(chars) - 1)] for v in row)
+                        for row in m
+                    )
+
+                print("Input image:")
+                print(render(img))
+                print()
+                print("Sobel edge response (one ttnn.matmul over image patches):")
+                print(render(result))
+                print()
+                print(f"max_err vs numpy reference: {max_err:.4f}")
+                print("PASSED" if max_err < 0.5 else "FAILED")
+            `),
+        },
     };
 
     // ─── CloudPlaygroundController ────────────────────────────────────────────
@@ -362,34 +666,29 @@
             this._running = false;
             this._currentKey = null;
             this._currentModel = null;
+            this._activeCategory = KERNELS['hello_tensor'].category;
 
             this._buildUI();
+            this._setCategory(this._activeCategory);
             this._selectKernel('hello_tensor');
         }
 
         _buildUI() {
-            const cardsHtml = CATEGORIES.map(cat => {
-                const entries = Object.entries(KERNELS).filter(([, k]) => k.category === cat.key);
-                if (!entries.length) return '';
-                const cards = entries.map(([key, k]) => `
-<div class="tt-pg-card" data-key="${key}" tabindex="0" role="button">
-  <div class="tt-pg-card-title">${k.label}</div>
-  <div class="tt-pg-card-blurb">${k.blurb}</div>
-  ${k.tag ? `<div class="tt-pg-card-tag">${k.tag}</div>` : ''}
-</div>`).join('');
-                return `
-<div class="tt-pg-category">
-  <div class="tt-pg-category-label">${cat.label}</div>
-  <div class="tt-pg-category-desc">${cat.desc}</div>
-  <div class="tt-pg-card-row">${cards}</div>
-</div>`;
-            }).join('');
+            const tabsHtml = CATEGORIES.map(cat => `
+<button class="tt-pg-tab" data-cat="${cat.key}" type="button">${cat.label}</button>`).join('');
 
             this._mount.innerHTML = `
 <div class="tt-pg-cloud-notice" id="tt-pg-cloud-notice"></div>
-<div class="tt-pg-cards">${cardsHtml}</div>
-<div class="tt-pg-layout">
-  <div class="tt-pg-editor-col">
+<div class="tt-pg-tabbar" id="tt-pg-tabbar">${tabsHtml}</div>
+<div class="tt-pg-workspace">
+  <div class="tt-pg-browse-col">
+    <div class="tt-pg-browse-header">
+      <div class="tt-pg-category-desc" id="tt-pg-category-desc"></div>
+      <button class="tt-pg-btn tt-pg-surprise-btn" id="tt-pg-surprise" type="button" title="Jump to a random kernel">&#127922; Surprise me</button>
+    </div>
+    <div class="tt-pg-card-grid" id="tt-pg-card-grid"></div>
+  </div>
+  <div class="tt-pg-do-col">
     <div class="tt-pg-toolbar">
       <span class="tt-pg-active-label" id="tt-pg-active-label"></span>
       <span class="tt-pg-model-picker" id="tt-pg-model-picker" hidden>
@@ -399,24 +698,33 @@
       <button class="tt-pg-btn tt-pg-run-btn" id="tt-pg-run">&#9654; Run on Simulator</button>
       <button class="tt-pg-btn tt-pg-clear-btn" id="tt-pg-clear">&#10006; Clear</button>
     </div>
-    <textarea class="tt-pg-code" id="tt-pg-code" spellcheck="false"></textarea>
-  </div>
-  <div class="tt-pg-output-col">
-    <div class="tt-pg-output-header">Output</div>
-    <pre class="tt-pg-output" id="tt-pg-output"></pre>
+    <div class="tt-pg-layout">
+      <div class="tt-pg-editor-col">
+        <textarea class="tt-pg-code" id="tt-pg-code" spellcheck="false"></textarea>
+      </div>
+      <div class="tt-pg-output-col">
+        <div class="tt-pg-output-header">Output</div>
+        <pre class="tt-pg-output" id="tt-pg-output"></pre>
+      </div>
+    </div>
   </div>
 </div>`;
 
-            this._mount.querySelectorAll('.tt-pg-card').forEach(card => {
-                card.addEventListener('click', () => this._selectKernel(card.dataset.key));
-                card.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        this._selectKernel(card.dataset.key);
-                    }
-                });
+            this._tabbarEl = this._mount.querySelector('#tt-pg-tabbar');
+            this._gridEl = this._mount.querySelector('#tt-pg-card-grid');
+            this._categoryDescEl = this._mount.querySelector('#tt-pg-category-desc');
+
+            this._tabbarEl.querySelectorAll('.tt-pg-tab').forEach(tab => {
+                tab.addEventListener('click', () => this._setCategory(tab.dataset.cat));
             });
 
+            this._gridEl.addEventListener('keydown', (e) => {
+                if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+                e.preventDefault();
+                this._moveCardFocus(e.key);
+            });
+
+            this._mount.querySelector('#tt-pg-surprise').addEventListener('click', () => this._surpriseMe());
             this._mount.querySelector('#tt-pg-run').addEventListener('click', () => this._run());
             this._mount.querySelector('#tt-pg-clear').addEventListener('click', () => this._clearOutput());
 
@@ -435,6 +743,67 @@
             this._modelSelEl = modelSel;
 
             this._showCloudStatus();
+        }
+
+        // Renders the card grid for the given category key, preserving which
+        // card (if any) is currently active.
+        _renderGrid(categoryKey) {
+            const cat = CATEGORIES.find(c => c.key === categoryKey) || CATEGORIES[0];
+            this._categoryDescEl.textContent = cat.desc;
+
+            const entries = Object.entries(KERNELS).filter(([, k]) => k.category === categoryKey);
+            this._gridEl.innerHTML = entries.map(([key, k]) => {
+                const dots = [1, 2, 3].map(n => `<span class="tt-pg-dot${n <= (k.complexity || 1) ? ' filled' : ''}"></span>`).join('');
+                return `
+<div class="tt-pg-card${key === this._currentKey ? ' active' : ''}" data-key="${key}" tabindex="0" role="button">
+  <div class="tt-pg-card-title">${k.label}</div>
+  <div class="tt-pg-card-blurb">${k.blurb}</div>
+  <div class="tt-pg-card-footer">
+    <span class="tt-pg-card-complexity" title="Complexity">${dots}</span>
+    ${k.tag ? `<span class="tt-pg-card-tag">${k.tag}</span>` : ''}
+  </div>
+</div>`;
+            }).join('');
+
+            this._gridEl.querySelectorAll('.tt-pg-card').forEach(card => {
+                card.addEventListener('click', () => this._selectKernel(card.dataset.key));
+                card.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        this._selectKernel(card.dataset.key);
+                    }
+                });
+            });
+        }
+
+        _setCategory(categoryKey) {
+            this._activeCategory = categoryKey;
+            this._tabbarEl.querySelectorAll('.tt-pg-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.cat === categoryKey);
+            });
+            this._renderGrid(categoryKey);
+        }
+
+        _moveCardFocus(key) {
+            const cards = Array.from(this._gridEl.querySelectorAll('.tt-pg-card'));
+            if (!cards.length) return;
+            const focused = this._mount.ownerDocument.activeElement;
+            let idx = cards.indexOf(focused);
+            if (idx === -1) idx = 0;
+            else if (key === 'ArrowLeft' || key === 'ArrowUp') idx = Math.max(0, idx - 1);
+            else idx = Math.min(cards.length - 1, idx + 1);
+            cards[idx].focus();
+        }
+
+        _surpriseMe() {
+            const keys = Object.keys(KERNELS).filter(k => k !== this._currentKey);
+            const pick = keys[Math.floor(Math.random() * keys.length)];
+            if (!pick) return;
+            const entry = KERNELS[pick];
+            this._setCategory(entry.category);
+            this._selectKernel(pick);
+            const card = this._gridEl.querySelector(`.tt-pg-card[data-key="${pick}"]`);
+            if (card) card.focus();
         }
 
         _selectKernel(key) {

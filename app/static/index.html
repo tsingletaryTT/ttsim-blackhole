@@ -22,13 +22,15 @@
   ::-webkit-scrollbar-thumb { background: rgba(79,209,197,0.2); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(79,209,197,0.45); }
 
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg0); color: var(--text); font-size: 14px;
+    margin: 0; display: flex; flex-direction: column; overflow: hidden;
   }
 
   .topbar { display: flex; align-items: center; gap: 12px; padding: 0 20px;
-            height: 48px; background: var(--bg3);
+            height: 44px; flex: 0 0 auto; background: var(--bg3);
             border-bottom: 1px solid rgba(79,209,197,0.15); }
   .logo { font-weight: 800; font-size: 15px; color: var(--teal);
           white-space: nowrap; letter-spacing: -0.3px; display: flex; align-items: center; gap: 6px; }
@@ -40,15 +42,27 @@
   .topbar-link:hover { color: var(--teal); }
   .topbar-link::after { content: " \2197"; font-size: 9px; opacity: 0.5; }
 
-  .hero { padding: 36px 20px 8px; max-width: 900px; }
-  .eyebrow { font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
-             color: var(--teal); margin-bottom: 12px; opacity: 0.9; }
-  .title { font-size: 28px; font-weight: 800; color: var(--text);
-           margin: 0 0 12px; letter-spacing: -0.5px; line-height: 1.2; }
-  .sub { font-size: 14px; color: var(--text2); line-height: 1.7; margin: 0 0 8px; max-width: 640px; }
+  /* Hero is a single compact strip -- the workspace below is the point,
+     not a page you scroll past to reach it. */
+  .hero { flex: 0 0 auto; padding: 10px 20px 6px; display: flex; align-items: baseline;
+          gap: 10px; flex-wrap: wrap; }
+  .eyebrow { display: none; }
+  .title { font-size: 15px; font-weight: 800; color: var(--text);
+           margin: 0; letter-spacing: -0.2px; white-space: nowrap; }
+  .title::before { content: "\26A1"; margin-right: 6px; }
+  .sub { font-size: 12px; color: var(--text2); line-height: 1.4; margin: 0;
+         max-width: 760px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .wrap { padding: 16px 20px 40px; max-width: 1400px; }
+  .wrap { flex: 1 1 auto; min-height: 0; padding: 0 20px 12px; display: flex;
+          flex-direction: column; }
+  .tt-cloud-playground-mount { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+
+  @media (max-width: 900px) {
+    html, body { height: auto; }
+    body { overflow: auto; }
+    .sub { white-space: normal; }
+  }
 
   select {
     background: var(--bg1); color: var(--text); border: 1px solid var(--bg2);
@@ -64,20 +78,39 @@
   button:disabled { opacity: 0.6; cursor: default; }
 
   /* ── Cloud connection notice ─────────────────────────────────────────── */
-  .tt-pg-cloud-notice { font-size: 12px; margin-bottom: 18px; }
+  .tt-pg-cloud-notice { font-size: 11.5px; flex: 0 0 auto; margin-bottom: 8px; }
   .tt-pg-notice-ok { color: var(--green); }
   .tt-pg-notice-warn { color: var(--gold); }
 
-  /* ── Category / card gallery ─────────────────────────────────────────── */
-  .tt-pg-category { margin-bottom: 24px; }
-  .tt-pg-category-label { font-size: 12px; font-weight: 700; letter-spacing: 1.2px;
-                           text-transform: uppercase; color: var(--teal); margin-bottom: 3px; }
-  .tt-pg-category-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-  .tt-pg-card-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  /* ── Category tab bar ─────────────────────────────────────────────────── */
+  .tt-pg-tabbar { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; margin-bottom: 10px; }
+  .tt-pg-tab {
+    background: var(--bg1); color: var(--text2); border: 1px solid var(--bg2);
+    font-size: 11px; font-weight: 700; letter-spacing: 0.3px; padding: 6px 12px;
+    border-radius: 999px; cursor: pointer; white-space: nowrap; transition: all 0.12s;
+  }
+  .tt-pg-tab:hover { border-color: var(--teal); color: var(--text); filter: none; }
+  .tt-pg-tab.active { background: rgba(79,209,197,0.14); border-color: var(--teal); color: var(--teal-lt); }
+
+  /* ── Workspace: browse (discover) + do (edit/run), side by side ─────── */
+  .tt-pg-workspace { flex: 1 1 auto; min-height: 0; display: flex; gap: 16px; }
+  .tt-pg-browse-col { flex: 1 1 38%; min-width: 280px; min-height: 0; display: flex; flex-direction: column; }
+  .tt-pg-browse-header { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; margin-bottom: 8px; }
+  .tt-pg-category-desc { font-size: 11.5px; color: var(--muted); flex: 1; }
+  .tt-pg-surprise-btn { background: var(--bg1); color: var(--teal-lt); border: 1px solid var(--bg2); white-space: nowrap; }
+  .tt-pg-surprise-btn:hover { border-color: var(--teal); filter: none; }
+
+  /* ── Card grid (its own scroll region -- browsing never pushes the
+     editor/output off-screen) ─────────────────────────────────────────── */
+  .tt-pg-card-grid {
+    flex: 1; min-height: 0; overflow-y: auto; display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    align-content: start; gap: 10px; padding: 2px 4px 2px 0;
+  }
   .tt-pg-card {
-    flex: 1; min-width: 220px; max-width: 320px; background: var(--bg1);
-    border: 1px solid var(--bg2); border-radius: 10px; padding: 14px 16px;
-    cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+    background: var(--bg1); border: 1px solid var(--bg2); border-radius: 10px;
+    padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column;
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
   }
   .tt-pg-card:hover, .tt-pg-card:focus-visible {
     border-color: var(--teal); box-shadow: 0 0 0 1px rgba(79,209,197,0.25), 0 4px 16px rgba(0,0,0,0.25);
@@ -85,36 +118,50 @@
   }
   .tt-pg-card.active { border-color: var(--teal); background: rgba(79,209,197,0.07); }
   .tt-pg-card-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 5px; }
-  .tt-pg-card-blurb { font-size: 11.5px; color: var(--text2); line-height: 1.5; }
-  .tt-pg-card-tag { display: inline-block; margin-top: 8px; font-size: 9.5px; letter-spacing: 0.3px;
-                    color: var(--teal-lt); background: rgba(79,209,197,0.1); padding: 2px 8px; border-radius: 8px; }
+  .tt-pg-card-blurb { font-size: 11.5px; color: var(--text2); line-height: 1.5; flex: 1; }
+  .tt-pg-card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 8px; }
+  .tt-pg-card-complexity { display: flex; gap: 3px; }
+  .tt-pg-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--bg2); }
+  .tt-pg-dot.filled { background: var(--teal); }
+  .tt-pg-card-tag { font-size: 9.5px; letter-spacing: 0.3px; color: var(--teal-lt);
+                    background: rgba(79,209,197,0.1); padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
 
   /* ── Toolbar ──────────────────────────────────────────────────────────── */
-  .tt-pg-toolbar { display: flex; gap: 12px; align-items: center; margin: 24px 0 12px; flex-wrap: wrap; }
+  .tt-pg-do-col { flex: 1 1 62%; min-width: 360px; min-height: 0; display: flex; flex-direction: column; }
+  .tt-pg-toolbar { display: flex; gap: 12px; align-items: center; margin: 0 0 8px; flex: 0 0 auto; flex-wrap: wrap; }
   .tt-pg-active-label { font-size: 13px; font-weight: 700; color: var(--text); margin-right: auto; }
   .tt-pg-model-picker:not([hidden]) { display: flex; align-items: center; gap: 6px; }
   .tt-pg-label { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
 
   /* ── Editor / output layout ──────────────────────────────────────────── */
-  .tt-pg-layout { display: flex; gap: 16px; flex-wrap: wrap; }
+  .tt-pg-layout { flex: 1; min-height: 0; display: flex; gap: 16px; flex-wrap: wrap; }
   .tt-pg-editor-col, .tt-pg-output-col {
-    flex: 1; min-width: 340px; background: var(--bg1); border: 1px solid var(--bg2);
+    flex: 1; min-width: 300px; min-height: 200px; background: var(--bg1); border: 1px solid var(--bg2);
     border-radius: 10px; overflow: hidden; transition: border-color 0.18s;
+    display: flex; flex-direction: column;
   }
   .tt-pg-editor-col:focus-within { border-color: var(--teal); }
   .tt-pg-output-header { font-size: 9px; letter-spacing: 1.8px; text-transform: uppercase;
-                         color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--bg2); }
+                         color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--bg2); flex: 0 0 auto; }
   .tt-pg-code, .tt-pg-output {
-    width: 100%; height: 460px; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+    flex: 1; min-height: 0; width: 100%; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
     font-size: 12.5px; background: var(--bg3); color: var(--text); border: none;
-    padding: 14px; margin: 0; box-sizing: border-box; resize: vertical;
+    padding: 14px; margin: 0; box-sizing: border-box; resize: none;
   }
   .tt-pg-code:focus { outline: none; }
-  .tt-pg-output { overflow: auto; white-space: pre-wrap; color: var(--teal-lt); resize: none; }
+  .tt-pg-output { overflow: auto; white-space: pre-wrap; color: var(--teal-lt); }
   .tt-pg-stderr { color: var(--red); }
   .tt-pg-ok { color: var(--green); }
 
-  .footer { padding: 24px 20px 40px; display: flex; gap: 20px; flex-wrap: wrap; }
+  @media (max-width: 900px) {
+    .tt-pg-workspace { flex-direction: column; height: auto; }
+    .tt-pg-browse-col, .tt-pg-do-col { min-width: 0; }
+    .tt-pg-card-grid { max-height: 320px; }
+    .tt-pg-layout { flex-direction: column; }
+    .tt-pg-editor-col, .tt-pg-output-col { height: 340px; flex: none; }
+  }
+
+  .footer { padding: 10px 20px; flex: 0 0 auto; display: flex; gap: 20px; flex-wrap: wrap; }
   .footer a { font-size: 11px; color: var(--text2); text-decoration: none; }
   .footer a:hover { color: var(--teal); }
   .footer a::after { content: " \2197"; font-size: 9px; opacity: 0.5; }
@@ -130,14 +177,9 @@
 </div>
 
 <div class="hero">
-  <div class="eyebrow">real ttnn &middot; simulated blackhole &middot; zero hardware</div>
-  <h1 class="title">Run real ttnn code on a simulated Blackhole chip</h1>
+  <h1 class="title">Real ttnn on a simulated Blackhole</h1>
   <p class="sub">
-    No Tenstorrent hardware anywhere in this container. Pick something below
-    &mdash; a first tensor op, a real language model, a deliberately broken
-    rule, even a second (virtual) chip &mdash; hit Run, and watch real output
-    stream back from a real (virtual) chip. Edit anything. Break things on
-    purpose. That's the point.
+    Zero Tenstorrent hardware in this container. Pick a card, edit anything, hit Run &mdash; real output streams back from a real (virtual) chip.
   </p>
 </div>
 
