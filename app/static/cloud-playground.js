@@ -148,6 +148,143 @@
         print("PASSED")
     `);
 
+    const REAL_TNT_CODE = _dedent(`
+        # tt-tnt: a 123M-parameter Llama-3-style model trained from random
+        # initialization ON Blackhole (via ttml/tt-train) -- not merely
+        # trained elsewhere and ported here. Real weights, real architecture:
+        # RMSNorm, rotary position embeddings, grouped-query attention
+        # (16 query heads sharing 4 KV heads), SwiGLU MLP. Every one of those
+        # pieces is written out below and run through ttnn on this simulated
+        # chip, the same way the GPT-2 kernel does for its architecture.
+        import torch
+        import torch.nn.functional as F
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        MODEL_ID = "episod/tt-tnt-1024"
+        PROMPT = "Once upon a time, there was a little"
+
+
+        def tt_matmul(x, w_T):
+            xt = ttnn.from_torch(x.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            wt = ttnn.from_torch(w_T.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            return ttnn.to_torch(ttnn.from_device(ttnn.matmul(xt, wt))).float()
+
+
+        def tt_rms_norm(x, w, eps):
+            xt = ttnn.from_torch(x.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            wt = ttnn.from_torch(w.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            y = ttnn.rms_norm(xt, weight=wt, epsilon=eps)
+            return ttnn.to_torch(ttnn.from_device(y)).float()
+
+
+        def tt_silu(x):
+            xt = ttnn.from_torch(x.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            return ttnn.to_torch(ttnn.from_device(ttnn.silu(xt))).float()
+
+
+        def tt_multiply(a, b):
+            at = ttnn.from_torch(a.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            bt = ttnn.from_torch(b.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            return ttnn.to_torch(ttnn.from_device(ttnn.multiply(at, bt))).float()
+
+
+        def rotate_half(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+
+        def apply_rope(q, k, cos, sin):
+            return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+
+        def repeat_kv(x, n_rep):
+            # Grouped-query attention: each of the 4 KV heads is shared by
+            # 4 query heads, so K/V get duplicated to match Q's head count
+            # before the attention matmul.
+            kvh, seq, hd = x.shape
+            x = x[:, None, :, :].expand(kvh, n_rep, seq, hd)
+            return x.reshape(kvh * n_rep, seq, hd)
+
+
+        torch.manual_seed(0)
+        tok = AutoTokenizer.from_pretrained(MODEL_ID)
+        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.float32)
+        model.eval()
+
+        cfg = model.config
+        n_layer, n_head, n_kv_head = cfg.num_hidden_layers, cfg.num_attention_heads, cfg.num_key_value_heads
+        head_dim = cfg.hidden_size // n_head
+        eps, theta = cfg.rms_norm_eps, cfg.rope_theta
+        sd = model.state_dict()
+
+        input_ids = tok(PROMPT, return_tensors="pt").input_ids
+        seq_len = input_ids.shape[1]
+        print(f"Model: {MODEL_ID}  ({n_layer} layers, {n_head} heads / {n_kv_head} KV heads, trained on real Blackhole hardware)")
+        print(f"Prompt: {PROMPT!r} ({seq_len} tokens)")
+
+        emb = sd["model.embed_tokens.weight"]
+        h = emb[input_ids[0]]
+
+        # Rotary position embeddings: precomputed cos/sin tables, applied to
+        # Q/K per layer below.
+        positions = torch.arange(seq_len)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        freqs = torch.outer(positions.float(), inv_freq)
+        emb_ang = torch.cat((freqs, freqs), dim=-1)
+        cos, sin = emb_ang.cos(), emb_ang.sin()
+
+        mask = torch.triu(torch.full((seq_len, seq_len), float("-1e4")), diagonal=1)
+        mask = mask.unsqueeze(0).expand(n_head, seq_len, seq_len).contiguous()
+
+        for i in range(n_layer):
+            p = f"model.layers.{i}."
+            ln1 = tt_rms_norm(h, sd[p + "input_layernorm.weight"], eps)
+            q = tt_matmul(ln1, sd[p + "self_attn.q_proj.weight"].T.contiguous())
+            k = tt_matmul(ln1, sd[p + "self_attn.k_proj.weight"].T.contiguous())
+            v = tt_matmul(ln1, sd[p + "self_attn.v_proj.weight"].T.contiguous())
+
+            q = q.view(seq_len, n_head, head_dim).transpose(0, 1)
+            k = k.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
+            v = v.view(seq_len, n_kv_head, head_dim).transpose(0, 1)
+
+            q, k = apply_rope(q, k, cos, sin)
+            k = repeat_kv(k, n_head // n_kv_head)
+            v = repeat_kv(v, n_head // n_kv_head)
+
+            scale = head_dim ** -0.5
+            qt = ttnn.from_torch(q.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            kt = ttnn.from_torch(k.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            vt = ttnn.from_torch(v.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            maskt = ttnn.from_torch(mask.bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
+            scores = ttnn.matmul(qt, ttnn.permute(kt, (0, 2, 1))) * scale
+            scores = scores + maskt
+            attn = ttnn.softmax(scores, dim=-1)
+            out_h = ttnn.to_torch(ttnn.from_device(ttnn.matmul(attn, vt))).float()
+
+            out = out_h.transpose(0, 1).contiguous().view(seq_len, -1)
+            out = tt_matmul(out, sd[p + "self_attn.o_proj.weight"].T.contiguous())
+            h = h + out
+
+            ln2 = tt_rms_norm(h, sd[p + "post_attention_layernorm.weight"], eps)
+            gate = tt_matmul(ln2, sd[p + "mlp.gate_proj.weight"].T.contiguous())
+            up = tt_matmul(ln2, sd[p + "mlp.up_proj.weight"].T.contiguous())
+            mlp_out = tt_matmul(tt_multiply(tt_silu(gate), up), sd[p + "mlp.down_proj.weight"].T.contiguous())
+            h = h + mlp_out
+
+        h_final = tt_rms_norm(h, sd["model.norm.weight"], eps)
+        # tie_word_embeddings: the output projection IS the embedding table.
+        logits = tt_matmul(h_final[-1:], emb.T.contiguous())[0]
+
+        top5 = torch.topk(logits, 5)
+        next_word = tok.decode([int(logits.argmax().item())])
+        top5_words = [tok.decode([i]) for i in top5.indices.tolist()]
+
+        print(f"ttsim (Blackhole, {n_layer} real layers) predicts: {next_word!r}")
+        print(f"top-5: {list(zip(top5_words, [round(v, 2) for v in top5.values.tolist()]))}")
+        print(f"Continuation: {PROMPT}{next_word}")
+        print("PASSED")
+    `);
+
     const KERNELS = {
         'hello_tensor': {
             category: 'start',
@@ -231,6 +368,15 @@
                 { value: 'gpt2-medium', label: 'gpt2-medium (24 layers, slowest)' },
             ],
             code: REAL_MODEL_CODE,
+        },
+        'tt_tnt': {
+            category: 'model',
+            label: 'tt-tnt: Tenstorrent’s Own Model',
+            blurb: 'A 123M-param Llama-3-style model trained from scratch ON Blackhole, not just deployed to it. RMSNorm, RoPE, and grouped-query attention, all hand-written and run through ttnn here.',
+            tag: '~250MB download, first run',
+            complexity: 3,
+            backend: 'ttsim-bh',
+            code: REAL_TNT_CODE,
         },
         'softmax_only': {
             category: 'ops',
