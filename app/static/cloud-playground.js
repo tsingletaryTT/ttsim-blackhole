@@ -307,6 +307,20 @@
     const PYWARN_RE = /^\S+\.py:\d+:\s*\w*Warning:/;
     const CONFIG_DUMP_RE = /^Config\{/;
 
+    // ─── Deep links ─────────────────────────────────────────────────────────
+    // #sec-<category slug>  -> jumps to that category's tab
+    // #demo-<kernel slug>   -> jumps to that kernel's card and selects it
+    // Kernel slugs are just the key with underscores swapped for hyphens
+    // (no kernel key contains a literal hyphen, so this reverses cleanly);
+    // category slugs are explicit (see CATEGORIES) so the URL can stay short
+    // even where the internal key isn't.
+    function kernelSlug(key) {
+        return key.replace(/_/g, '-');
+    }
+    function kernelKeyFromSlug(slug) {
+        return slug.replace(/-/g, '_');
+    }
+
     const KERNELS = {
         'hello_tensor': {
             category: 'start',
@@ -899,8 +913,37 @@
             this._pendingLineText = { stdout: '', stderr: '' };
 
             this._buildUI();
-            this._setCategory(this._activeCategory);
-            this._selectKernel('hello_tensor');
+            if (!this._applyHash(window.location.hash)) {
+                this._setCategory(this._activeCategory);
+                this._selectKernel('hello_tensor');
+            }
+
+            // Back/forward and pasted/edited links. Our own hash writes use
+            // history.replaceState (see _setCategory/_selectKernel), which
+            // does not fire hashchange, so this only ever reacts to an
+            // external change -- no risk of feedback loops.
+            window.addEventListener('hashchange', () => this._applyHash(window.location.hash));
+        }
+
+        // Returns true if the hash matched a known category or kernel.
+        _applyHash(hash) {
+            const raw = (hash || '').replace(/^#/, '');
+            if (!raw) return false;
+            if (raw.startsWith('demo-')) {
+                const key = kernelKeyFromSlug(raw.slice('demo-'.length));
+                if (!KERNELS[key]) return false;
+                this._setCategory(KERNELS[key].category);
+                this._selectKernel(key);
+                return true;
+            }
+            if (raw.startsWith('sec-')) {
+                const slug = raw.slice('sec-'.length);
+                const cat = CATEGORIES.find(c => c.slug === slug);
+                if (!cat) return false;
+                this._setCategory(cat.key);
+                return true;
+            }
+            return false;
         }
 
         _buildUI() {
@@ -1037,6 +1080,9 @@
                 tab.classList.toggle('active', tab.dataset.cat === categoryKey);
             });
             this._renderGrid(categoryKey);
+
+            const cat = CATEGORIES.find(c => c.key === categoryKey);
+            if (cat) window.history.replaceState(null, '', `#sec-${cat.slug}`);
         }
 
         _moveCardFocus(key) {
@@ -1086,6 +1132,7 @@
                 this._modelPickerEl.hidden = true;
             }
 
+            window.history.replaceState(null, '', `#demo-${kernelSlug(key)}`);
             this._loadCode();
         }
 
