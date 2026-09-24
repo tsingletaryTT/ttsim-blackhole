@@ -22,15 +22,18 @@
 
     // ─── Categories (display order) ───────────────────────────────────────────
 
+    // `slug` is the deep-link fragment for this category, as #sec-<slug>
+    // (e.g. #sec-real). Kept separate from `key` so the URL can stay short
+    // and readable even where the internal key isn't (key 'model' -> #sec-real).
     const CATEGORIES = [
-        { key: 'start', label: 'Start Here', desc: 'The smallest useful programs. No AI, no chip lore required.' },
-        { key: 'ops', label: 'Op Zoo', desc: 'More of the primitives a transformer leans on, isolated and checked one at a time.' },
-        { key: 'model', label: 'Run a Real Model', desc: 'An actual HuggingFace checkpoint, real weights, a real prediction.' },
-        { key: 'scale', label: 'Bigger Compute', desc: 'Same primitives, turned up: a deeper model, real tensor parallelism across chips.' },
-        { key: 'precision', label: 'Precision & Numbers', desc: 'bfloat16 saves memory. It is not free. See what you gain and lose.' },
-        { key: 'push', label: 'Push the Simulator', desc: 'ttsim is deliberately stricter than silicon. See what that means.' },
-        { key: 'mesh', label: 'Multi-Chip', desc: 'Two virtual chips, one program — no second card required.' },
-        { key: 'dsp', label: 'Signal Processing', desc: 'An AI accelerator, repurposed as an audio and image filter.' },
+        { key: 'start', slug: 'start', label: 'Start Here', desc: 'The smallest useful programs. No AI, no chip lore required.' },
+        { key: 'ops', slug: 'ops', label: 'Op Zoo', desc: 'More of the primitives a transformer leans on, isolated and checked one at a time.' },
+        { key: 'model', slug: 'real', label: 'Run a Real Model', desc: 'An actual HuggingFace checkpoint, real weights, a real prediction.' },
+        { key: 'scale', slug: 'scale', label: 'Bigger Compute', desc: 'Same primitives, turned up: a deeper model, real tensor parallelism across chips.' },
+        { key: 'precision', slug: 'precision', label: 'Precision & Numbers', desc: 'bfloat16 saves memory. It is not free. See what you gain and lose.' },
+        { key: 'push', slug: 'push', label: 'Push the Simulator', desc: 'ttsim is deliberately stricter than silicon. See what that means.' },
+        { key: 'mesh', slug: 'mesh', label: 'Multi-Chip', desc: 'Two virtual chips, one program — no second card required.' },
+        { key: 'dsp', slug: 'dsp', label: 'Signal Processing', desc: 'An AI accelerator, repurposed as an audio and image filter.' },
     ];
 
     // ─── Kernel snippets ───────────────────────────────────────────────────────
@@ -289,6 +292,20 @@
         print(f"Continuation: {PROMPT}{next_word}")
         print("PASSED")
     `);
+
+    // ─── Output-line classifiers ───────────────────────────────────────────────
+    // These recognize logging formats that show up in real ttnn runs but don't
+    // carry spdlog's own "| LEVEL |" shape: TensorFlow/absl's own bracketed
+    // logger (pulled in transitively by transformers), Python's warnings.warn()
+    // traceback line, and a bare "Config{...}" line -- ttnn logs its startup
+    // config as logger.debug(f"...\n{CONFIG}"), a single spdlog call whose
+    // message contains an embedded newline, so the payload lands as its own
+    // line with no level tag of its own.
+    const ABSL_RE = /^[EWIF]\d{4}\s/;
+    const TF_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d+:\s*[EWIF]\b/;
+    const BARE_LEVEL_RE = /^\s*(WARNING|ERROR)\s*:/;
+    const PYWARN_RE = /^\S+\.py:\d+:\s*\w*Warning:/;
+    const CONFIG_DUMP_RE = /^Config\{/;
 
     const KERNELS = {
         'hello_tensor': {
@@ -1157,9 +1174,10 @@
         // a tty, so spdlog itself never emits ANSI codes to pass through;
         // this reproduces the same severity coloring from the level tag
         // ttnn's logger already prints in every line ("... | warning | ...").
-        // A matched level tag also means this is framework log noise, not
-        // the kernel's own print() output -- routed to the "logs" pane so
-        // the "output" pane stays just the program's own result.
+        // A matched level tag (or one of the other known noise shapes above)
+        // means this is framework log noise, not the kernel's own print()
+        // output -- routed to the "logs" pane so "output" stays just the
+        // program's own result.
         _classifyLine(line, streamKey) {
             const m = line.match(/\|\s*(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|ERR|CRITICAL)\s*\|/i);
             if (m) {
@@ -1173,6 +1191,22 @@
                 else cls = 'tt-pg-log-info';
                 return { cls, pane: 'logs' };
             }
+            if (CONFIG_DUMP_RE.test(line)) {
+                return { cls: 'tt-pg-log-debug', pane: 'logs' };
+            }
+            const bare = line.match(BARE_LEVEL_RE);
+            if (bare) {
+                return { cls: bare[1] === 'ERROR' ? 'tt-pg-log-error' : 'tt-pg-log-warn', pane: 'logs' };
+            }
+            if (PYWARN_RE.test(line)) {
+                return { cls: 'tt-pg-log-warn', pane: 'logs' };
+            }
+            const tf = line.match(TF_RE) || line.match(ABSL_RE);
+            if (tf) {
+                const letter = (tf[0].match(/[EWIF]/) || ['I'])[0];
+                const cls = letter === 'E' ? 'tt-pg-log-error' : letter === 'W' ? 'tt-pg-log-warn' : 'tt-pg-log-info';
+                return { cls, pane: 'logs' };
+            }
             return { cls: streamKey === 'stderr' ? 'tt-pg-stderr' : 'tt-pg-stdout', pane: 'output' };
         }
 
@@ -1183,8 +1217,19 @@
         // in-progress span into its (possibly newly decided) pane on every
         // update also correctly handles the rare case where a chunk splits
         // before the log-level tag is visible yet.
+        //
+        // A line with none of _classifyLine's recognized shapes, but which
+        // immediately follows a logs-pane line within this SAME chunk, is
+        // treated as a continuation of that message rather than the kernel's
+        // own output -- e.g. Python's warnings.warn() can print several
+        // unmarked lines of message body after its ".py:NNN: XWarning:"
+        // line, all in one process write() (and so, in practice, one chunk).
+        // Scoping this to "same chunk" only (never persisted across
+        // separate reads) keeps a real print() that happens to follow
+        // framework noise in a *later* chunk from being misclassified.
         _appendStreamText(streamKey, text) {
             const parts = text.split('\n');
+            let lastPaneThisChunk = null;
             for (let i = 0; i < parts.length; i++) {
                 if (!this._pendingLineEl[streamKey]) {
                     this._pendingLineEl[streamKey] = document.createElement('span');
@@ -1192,7 +1237,11 @@
                 }
                 this._pendingLineText[streamKey] += parts[i];
                 const el = this._pendingLineEl[streamKey];
-                const { cls, pane } = this._classifyLine(this._pendingLineText[streamKey], streamKey);
+                let { cls, pane } = this._classifyLine(this._pendingLineText[streamKey], streamKey);
+                if (pane === 'output' && lastPaneThisChunk === 'logs') {
+                    cls = 'tt-pg-log-debug';
+                    pane = 'logs';
+                }
                 el.textContent = this._pendingLineText[streamKey];
                 el.className = cls;
                 const paneEl = this._outputPanes[pane];
@@ -1204,6 +1253,7 @@
                     this._pendingLineText[streamKey] = '';
                     this._paneLineCounts[pane]++;
                     this._updateTabLabel(pane);
+                    lastPaneThisChunk = pane;
                 }
             }
             Object.values(this._outputPanes).forEach(pane => { pane.scrollTop = pane.scrollHeight; });
