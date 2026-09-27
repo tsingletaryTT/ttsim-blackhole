@@ -619,7 +619,7 @@
         'tensor_parallel_matmul': {
             category: 'scale',
             label: 'Tensor-Parallel Matmul',
-            blurb: 'A weight matrix split by column across two virtual chips — real tensor parallelism, the trick that fits bigger models on a cluster.',
+            blurb: 'A weight matrix split by column across two virtual chips — real tensor parallelism, the trick that fits bigger models on a cluster. As of ttsim v1.10.10, the simulated Ethernet link between them runs Blackhole’s own simulator-only base firmware.',
             tag: '2× Blackhole, tensor-parallel',
             complexity: 3,
             backend: 'ttsim-bh-x2',
@@ -703,7 +703,7 @@
         'mesh': {
             category: 'mesh',
             label: 'Two Chips, One Tensor',
-            blurb: 'Two virtual Blackhole chips, connected by simulated Ethernet, sharing one tensor operation.',
+            blurb: 'Two virtual Blackhole chips, connected by simulated Ethernet, sharing one tensor operation. Since ttsim v1.10.10 that link runs Blackhole’s own simulator-only base firmware.',
             tag: '2× Blackhole',
             complexity: 2,
             backend: 'ttsim-bh-x2',

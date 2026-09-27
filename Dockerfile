@@ -7,8 +7,8 @@
 # (libmpi, libhwloc, libnuma, libevent-core/pthreads) are already present.
 FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-rc
 
-# Build ttsim's Blackhole simulator library from source, pinned to v1.10.8
-# (the latest tag as of 2026-09-15).
+# Build ttsim's Blackhole simulator library from source, pinned to v1.10.10
+# (the latest tag as of 2026-09-27).
 #
 # History: v1.10.1 was pinned instead of latest for a while, because v1.10.3
 # through v1.10.6 had a reproduced regression on Blackhole -- any
@@ -32,7 +32,36 @@ FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-
 # ADC counter) that don't apply to anything this Space currently exercises.
 # Bumping anyway to track upstream and pick up the fixes for free. Re-ran all
 # 7 kernels end-to-end against the rebuilt image before pushing.
-RUN git clone --depth=1 --branch v1.10.8 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
+#
+# 2026-09-27: bumped to v1.10.10 (v1.10.9 and v1.10.10 both released since
+# the v1.10.8 pin). Neither touches the wide-matmul regression above either.
+# v1.10.9 is mostly QSR/CSR-register plumbing this Space doesn't touch, plus
+# a sign-preserving SFPLUTFP32 fix on WH/BH. v1.10.10 is the one worth
+# calling out for this pairing specifically: "Added simulator-only Ethernet
+# base FW for BH" -- the mesh/tensor-parallel kernels below (ttsim-bh-x2)
+# already ran on the older BH Ethernet path, so this is a fidelity
+# improvement to code this Space already exercises, not a new code path.
+# It also adds BroadcastSrcBRow support to MVMUL on WH/BH and more faithful
+# WH/BH telemetry reporting -- neither is exercised by any kernel here yet
+# (tried wiring a new ttsim-bh-x2 kernel around ttnn.all_gather to actually
+# exercise chip-to-chip traffic over the new BH Ethernet FW instead of just
+# host-mediated shard/concat like the two kernels below; it fails on this
+# image with `TT_FATAL: this->fabric_context_ != nullptr` -- the CCL fabric
+# layer needs explicit initialization this pairing doesn't do, a separate
+# yak to shave, so left out rather than shipping a demo that doesn't run).
+# Re-ran all bh kernels (hello_tensor, eltwise_add, matmul_1d,
+# wide_matmul_regression, fp32_vs_bf16, softmax_only, reduction_ops,
+# embedding_lookup, race_condition) and both bh-x2 kernels (mesh,
+# tensor_parallel_matmul) end to end against the rebuilt image before
+# pushing, plus a distilgpt2 spot-check of the Real HF Checkpoint kernel.
+# All PASSED (softmax_only's unseeded random input occasionally lands
+# max_err just under its 1e-2 threshold either way -- a pre-existing
+# characteristic of that kernel, not a v1.10.10 regression). The bh_x2
+# curl below also picked up `-f` here (Copilot review flagged the missing
+# download validation): without it, a failed download (404, redirect to an
+# HTML error page, etc.) would silently succeed and bake a corrupt .so into
+# the image instead of failing the build.
+RUN git clone --depth=1 --branch v1.10.10 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
     && cd /opt/ttsim-src \
     && ./make.py src/_out/release_bh/libttsim.so \
     && mkdir -p /opt/sim/bh \
@@ -44,10 +73,10 @@ RUN git clone --depth=1 --branch v1.10.8 https://github.com/tenstorrent/ttsim.gi
 COPY soc_descriptor_bh.yaml /opt/sim/bh/soc_descriptor.yaml
 
 # The 2-chip Blackhole (P300) simulator, for the mesh kernel -- prebuilt
-# release binary (no source build needed for this one), same v1.10.8 pin.
+# release binary (no source build needed for this one), same v1.10.10 pin.
 RUN mkdir -p /opt/sim/bh_x2 \
-    && curl -sL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
-        https://github.com/tenstorrent/ttsim/releases/download/v1.10.8/libttsim_bh_x2.so
+    && curl -fsSL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
+        https://github.com/tenstorrent/ttsim/releases/download/v1.10.10/libttsim_bh_x2.so
 COPY soc_descriptor_bh.yaml /opt/sim/bh_x2/soc_descriptor.yaml
 COPY blackhole_P300_both_mmio.yaml /opt/sim/bh_x2/cluster_descriptor.yaml
 
