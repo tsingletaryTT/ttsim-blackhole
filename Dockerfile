@@ -56,7 +56,11 @@ FROM ghcr.io/tenstorrent/tt-metal/tt-metalium-ubuntu-22.04-release-amd64:latest-
 # pushing, plus a distilgpt2 spot-check of the Real HF Checkpoint kernel.
 # All PASSED (softmax_only's unseeded random input occasionally lands
 # max_err just under its 1e-2 threshold either way -- a pre-existing
-# characteristic of that kernel, not a v1.10.10 regression).
+# characteristic of that kernel, not a v1.10.10 regression). The bh_x2
+# curl below also picked up `-f` here (Copilot review flagged the missing
+# download validation): without it, a failed download (404, redirect to an
+# HTML error page, etc.) would silently succeed and bake a corrupt .so into
+# the image instead of failing the build.
 RUN git clone --depth=1 --branch v1.10.10 https://github.com/tenstorrent/ttsim.git /opt/ttsim-src \
     && cd /opt/ttsim-src \
     && ./make.py src/_out/release_bh/libttsim.so \
@@ -71,7 +75,7 @@ COPY soc_descriptor_bh.yaml /opt/sim/bh/soc_descriptor.yaml
 # The 2-chip Blackhole (P300) simulator, for the mesh kernel -- prebuilt
 # release binary (no source build needed for this one), same v1.10.10 pin.
 RUN mkdir -p /opt/sim/bh_x2 \
-    && curl -sL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
+    && curl -fsSL -o /opt/sim/bh_x2/libttsim_bh_x2.so \
         https://github.com/tenstorrent/ttsim/releases/download/v1.10.10/libttsim_bh_x2.so
 COPY soc_descriptor_bh.yaml /opt/sim/bh_x2/soc_descriptor.yaml
 COPY blackhole_P300_both_mmio.yaml /opt/sim/bh_x2/cluster_descriptor.yaml
